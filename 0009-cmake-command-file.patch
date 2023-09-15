@@ -1,0 +1,20 @@
+From ca47ed8b28ff76823ca0a8c9c1e2577994f2b137 Mon Sep 17 00:00:00 2001
+From: Gonzalo Juarez <gjuarez@pa.uc3m.es>
+Date: Fri, 15 Sep 2023 19:51:37 +0200
+Subject: [PATCH 9/9] cmake command file
+
+---
+ .cmake.cmd.moa | 1 +
+ 1 file changed, 1 insertion(+)
+ create mode 100644 .cmake.cmd.moa
+
+diff --git a/.cmake.cmd.moa b/.cmake.cmd.moa
+new file mode 100644
+index 000000000..3d8f145af
+--- /dev/null
++++ b/.cmake.cmd.moa
+@@ -0,0 +1 @@
++cmake ../llvm/ -G Ninja -DCMAKE_CXX_FLAGS="-stdlib=libc++ -lstdc++ -fPIC" -DCMAKE_C_COMPILER="clang-15" -DCMAKE_CXX_COMPILER="clang++-15" -DLLVM_ENABLE_PROJECTS="clang;clang-tools-extra" -DCMAKE_BUILD_TYPE=Debug -DBUILD_SHARED_LIBS=ON -DLLVM_ENABLE_EH=YES -DLLVM_ENABLE_RTTI=ON -DLLVM_TARGETS_TO_BUILD=X86
+-- 
+2.34.1
+

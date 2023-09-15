@@ -1,0 +1,22 @@
+From 938c6ebef396460c2d17c638d004c55d7582ec91 Mon Sep 17 00:00:00 2001
+From: Gonzalo Juarez <gjuarez@pa.uc3m.es>
+Date: Fri, 15 Sep 2023 11:00:07 +0200
+Subject: [PATCH 6/9] `refactor`: `rt.sh`
+
+---
+ refactor-examples/rt.sh | 3 +++
+ 1 file changed, 3 insertions(+)
+ create mode 100755 refactor-examples/rt.sh
+
+diff --git a/refactor-examples/rt.sh b/refactor-examples/rt.sh
+new file mode 100755
+index 000000000..5639cab21
+--- /dev/null
++++ b/refactor-examples/rt.sh
+@@ -0,0 +1,3 @@
++#!/usr/bin/sh
++
++../refactor-build/bin/clang-tidy -checks="tfgjuarez-test-run-rewrite" ${@}
+-- 
+2.34.1
+

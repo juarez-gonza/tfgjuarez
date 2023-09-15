@@ -1,0 +1,170 @@
+From 28ad27e203eb79981386924d9117e18699d51682 Mon Sep 17 00:00:00 2001
+From: Gonzalo Juarez <gjuarez@pa.uc3m.es>
+Date: Fri, 15 Sep 2023 18:59:07 +0200
+Subject: [PATCH 7/9] `refactor`: initial implementation - (`buildInnerModel`
+ `buildInnerConcept`)
+
+---
+ .../tfgjuarez/TestRunRewriteCheck.cpp         | 85 +++++++++++++++++--
+ refactor-examples/expected/sum_lib.hpp        |  4 +-
+ 2 files changed, 82 insertions(+), 7 deletions(-)
+
+diff --git a/clang-tools-extra/clang-tidy/tfgjuarez/TestRunRewriteCheck.cpp b/clang-tools-extra/clang-tidy/tfgjuarez/TestRunRewriteCheck.cpp
+index 14bb7d603..cb2e7dbed 100644
+--- a/clang-tools-extra/clang-tidy/tfgjuarez/TestRunRewriteCheck.cpp
++++ b/clang-tools-extra/clang-tidy/tfgjuarez/TestRunRewriteCheck.cpp
+@@ -8,6 +8,7 @@
+ 
+ #include "TestRunRewriteCheck.h"
+ #include "clang/AST/ASTContext.h"
++#include "clang/AST/DeclCXX.h"
+ #include "clang/AST/PrettyPrinter.h"
+ #include "clang/AST/RecursiveASTVisitor.h"
+ #include "clang/ASTMatchers/ASTMatchFinder.h"
+@@ -51,7 +52,7 @@ AST_MATCHER(clang::Decl, hasVirtualConceptAnnotation) {
+ 
+ // ========================== CONSUMER ==========================
+ 
+-static constexpr llvm::StringRef VCBinding = "VCBinding";
++static constexpr const char *const VCBinding = "VCBinding";
+ 
+ class VirtualConceptDefinitionError
+     : public llvm::ErrorInfo<VirtualConceptDefinitionError> {
+@@ -77,6 +78,11 @@ char VirtualConceptDefinitionError::ID; // Used by inherited class.
+ // struct.
+ // - Transform virtual concept declarations to member functions of inner Concept
+ // struct.
++// NOTE:
++// - The above items will probably be better done using post order traversal
++// (left -> right -> root). Reducing results at each root.
++// - TraverseCXXRecordDecl may also give more control over visiting behaviour.
++// But it may require more coding.
+ 
+ class MapToVirtualConceptImpl
+     : public clang::RecursiveASTVisitor<MapToVirtualConceptImpl> {
+@@ -87,12 +93,78 @@ private:
+   std::string InnerConcept = "";
+   std::string MemberFunctions = "";
+ 
++  void buildMemberFunction(clang::CXXMethodDecl *D) {
++    llvm::raw_string_ostream FReader{MemberFunctions};
++    FReader << "friend ";
++    D->print(FReader);
++    FReader << ";\n";
++  }
++
++  void buildInnerModel(clang::CXXMethodDecl *D) {}
++
++  void buildInnerConcept(clang::CXXMethodDecl *D) {}
++
++  std::string finishVirtualConcept(clang::CXXRecordDecl *D) {
++    auto ClassId = D->getNameAsString();
++    auto ModelId = ClassId + "Model";
++    auto ConceptId = ClassId + "Concept";
++    return "virtual_concept " + ClassId +
++           " {\n"
++           "public:\n"
++           "template<typename T> constexpr " + // Constructor begin
++           ClassId +
++           "(T &&X)\n"
++           ": WrappedParams(std::make_unique<" +
++           ModelId +
++           "<std::remove_cv_t<std::remove_reference_t<T>>>>(std::forward<T>(X)"
++           ")) {}\n\n"                                   // Constructor end
++           "template<typename T, size_t N> constexpr " + // Array constructor
++                                                         // begin
++           ClassId +
++           "(T (&X)[N])\n"
++           ": WrappedParams(std::make_unique<" +
++           ModelId + "<T (&)[N]>>(X)) {}\n\n" // Array constructor end
++           + finishInnerConcept(ClassId) + finishInnerModel(ClassId) +
++           "private: std::unique_ptr<" + ConceptId +
++           "> WrappedParams;\n};\n"; // Pointer to base
++  }
++
++  std::string finishInnerModel(std::string ClassId) {
++    auto ModelId = ClassId + "Model";
++    auto ConceptId = ClassId + "Concept";
++    return "template<typename S> struct " + ModelId + " final : " + ConceptId +
++           " {\n"
++           "template<typename U> " + // Constructor begin
++           ModelId +
++           "(U &&X) : Params(std::forward<U>(X)) {}\n" // Constructor end
++           "template<typename U, size_t N> " + // Array constructor begin
++           ModelId +
++           "(U (&X)[N]) : Params(X) {}\n" // Array constructor end
++           + std::move(InnerModel) + "private: S Params;\n};\n";
++  }
++
++  std::string finishInnerConcept(std::string ClassId) {
++    auto ConceptId = ClassId + "Concept";
++    return "struct " + ConceptId +
++           " {\n"
++           "virtual ~" +
++           ConceptId + "() {}\n" + std::move(InnerConcept) + "\n};\n";
++  }
++
+ public:
+   std::string Result = "";
+ 
++  bool shouldTraversePostOrder() const { return true; }
++
++  bool VisitCXXRecordDecl(clang::CXXRecordDecl *D) {
++    Result = finishVirtualConcept(D);
++    return true;
++  }
++
+   bool VisitCXXMethodDecl(clang::CXXMethodDecl *D) {
+-    D->dump();
+-    llvm::outs() << "\n====================================================\n";
++    buildMemberFunction(D);
++    buildInnerConcept(D);
++    buildInnerModel(D);
+     return true;
+   }
+ };
+@@ -109,14 +181,17 @@ virtualConceptConsumer(const MatchFinder::MatchResult &Result) {
+   const auto *VCMatch = Result.Nodes.getNodeAs<clang::CXXRecordDecl>(VCBinding);
+   if (!VCMatch->hasDefinition() || VCMatch->hasDirectFields())
+     return llvm::make_error<VirtualConceptDefinitionError>();
++  llvm::outs()
++      << "\n================= virtualConceptConsumer() ==================\n";
+   return mapToVirtualConcept(const_cast<clang::CXXRecordDecl *>(VCMatch));
+ }
+ 
+ // ========================== TRANSFORMER ==========================
+ 
+ RewriteRuleWith<std::string> testRunRewriteCheckImpl() {
+-  return makeRule(cxxRecordDecl(hasVirtualConceptAnnotation()).bind(VCBinding),
+-                  changeTo(run(virtualConceptConsumer)),
++  return makeRule(cxxRecordDecl(hasVirtualConceptAnnotation(), hasDefinition())
++                      .bind(VCBinding),
++                  changeTo(node(VCBinding), run(virtualConceptConsumer)),
+                   cat("Generate code for virtual concept."));
+ }
+ 
+diff --git a/refactor-examples/expected/sum_lib.hpp b/refactor-examples/expected/sum_lib.hpp
+index cebcd1b23..7cc6dfb23 100644
+--- a/refactor-examples/expected/sum_lib.hpp
++++ b/refactor-examples/expected/sum_lib.hpp
+@@ -31,7 +31,7 @@ public:
+   constexpr Foo(T (&X)[N])
+       : WrappedParams(std::make_unique<FooModel<T (&)[N]>>(X)) {}
+ 
+-  friend void foo(const Foo &X) { X.WrappedParams->callFoo(); }
++  friend void foo(const Foo &X) { return X.WrappedParams->callFoo(); }
+ 
+   struct FooConcept {
+     virtual ~FooConcept() {}
+@@ -44,7 +44,7 @@ public:
+     template <typename U> FooModel(U &&X) : Params(std::forward<U>(X)) {}
+     template <typename U, size_t N> FooModel(U (&X)[N]) : Params(X) {}
+ 
+-    void callFoo() const override { foo(Params); }
++    void callFoo() const override { return foo(Params); }
+ 
+   private:
+     S Params;
+-- 
+2.34.1
+

@@ -1,0 +1,213 @@
+From a8af2aa72828463e99dcd9a2db92981d64bd685b Mon Sep 17 00:00:00 2001
+From: Gonzalo Juarez <gjuarez@pa.uc3m.es>
+Date: Thu, 14 Sep 2023 13:32:43 +0200
+Subject: [PATCH 3/9] : add refactor-exapmles/expected
+
+---
+ refactor-examples/.gitignore           |  1 +
+ refactor-examples/dc.sh                |  3 ++
+ refactor-examples/expected/main.cpp    | 20 ++++++++++
+ refactor-examples/expected/sum.cpp     | 10 +++++
+ refactor-examples/expected/sum.hpp     | 46 ++++++++++++++++++++++
+ refactor-examples/expected/sum_lib.hpp | 54 ++++++++++++++++++++++++++
+ refactor-examples/hello.cpp            | 12 ++++++
+ 7 files changed, 146 insertions(+)
+ create mode 100644 refactor-examples/.gitignore
+ create mode 100755 refactor-examples/dc.sh
+ create mode 100644 refactor-examples/expected/main.cpp
+ create mode 100644 refactor-examples/expected/sum.cpp
+ create mode 100644 refactor-examples/expected/sum.hpp
+ create mode 100644 refactor-examples/expected/sum_lib.hpp
+ create mode 100644 refactor-examples/hello.cpp
+
+diff --git a/refactor-examples/.gitignore b/refactor-examples/.gitignore
+new file mode 100644
+index 000000000..f47cb2045
+--- /dev/null
++++ b/refactor-examples/.gitignore
+@@ -0,0 +1 @@
++*.out
+diff --git a/refactor-examples/dc.sh b/refactor-examples/dc.sh
+new file mode 100755
+index 000000000..c0da16a8d
+--- /dev/null
++++ b/refactor-examples/dc.sh
+@@ -0,0 +1,3 @@
++#!/usr/bin/sh
++
++/home/gjuarez/p/llvm-project/refactor-build/bin/clang++ -lstdc++ -stdlib=libc++ ${@}
+diff --git a/refactor-examples/expected/main.cpp b/refactor-examples/expected/main.cpp
+new file mode 100644
+index 000000000..fe29d5d90
+--- /dev/null
++++ b/refactor-examples/expected/main.cpp
+@@ -0,0 +1,20 @@
++//// File: client.cpp
++
++#include "sum.hpp"
++#include <variant>
++#include <vector>
++
++int main() {
++  // This is a sort of work-around the lacking part of this design, which is a
++  // key usage of type-erasure, storing type-erased elements in a data
++  // structure. However, it does depend on std::variant, which is a closed
++  // sum-type, but at least it has well determined points of changes for when
++  // new overrides are introduced.
++  std::vector<Foo> Items{};
++  Items.emplace_back(3);
++  Items.emplace_back("asd");
++  // Items.emplace_back(4.5);
++  for (auto &Item : Items)
++    foo(Item);
++  return 0;
++}
+diff --git a/refactor-examples/expected/sum.cpp b/refactor-examples/expected/sum.cpp
+new file mode 100644
+index 000000000..c28c3cb03
+--- /dev/null
++++ b/refactor-examples/expected/sum.cpp
+@@ -0,0 +1,10 @@
++#include "sum.hpp"
++
++#include <iostream>
++
++//// File: client.hpp
++
++void foo(int X) { std::cout << "int case: " << X << "\n"; }
++
++
++void foo(std::string Str) { std::cout << "std::string case: " << Str << "\n"; }
+diff --git a/refactor-examples/expected/sum.hpp b/refactor-examples/expected/sum.hpp
+new file mode 100644
+index 000000000..568df8cf8
+--- /dev/null
++++ b/refactor-examples/expected/sum.hpp
+@@ -0,0 +1,46 @@
++#include "sum_lib.hpp"
++#include <iostream>
++#include <string>
++
++void foo(int X);
++
++// the specialization below should be automatically generated from the function
++// above. This struct is needed because the definition of foo(int) is not
++// seen by FooModel since it is declared FooModel's definition.
++
++// NOTE: every function corresponding to the virtual concept will have to be at
++// least declared in the same file. That is, a type must have all related
++// virtual concept stuff declared once per TU.
++
++template <> struct Foo::FooModel<int> final : FooConcept {
++  FooModel(int X) : Params(X) {}
++  void callFoo() const override { foo(Params); }
++
++private:
++  int Params;
++};
++//
++
++template <size_t N> void foo(const char (&Str)[N]) {
++  std::cout << "const char(&)[N] case: " << Str << "\n";
++}
++
++// the specialization below should be automatically generated from the function
++// above. This struct is needed because the definition of foo(const char (&)[N])
++// is not seen by FooModel since it is declared FooModel's definition.
++template <size_t N> struct Foo::FooModel<const char (&)[N]> final : FooConcept {
++  FooModel(const char(&X)[N]) : Params(X) {}
++  void callFoo() const override { foo<N>(Params); }
++
++private:
++  const char (&Params)[N];
++};
++
++// void foo(std::string Str);
++// template <> struct Foo::FooModel<std::string> final : FooConcept {
++//   FooModel(std::string X) : Params(X) {}
++//   void callFoo() const override { foo(Params); }
++//
++// private:
++//   std::string Params;
++// };
+diff --git a/refactor-examples/expected/sum_lib.hpp b/refactor-examples/expected/sum_lib.hpp
+new file mode 100644
+index 000000000..cebcd1b23
+--- /dev/null
++++ b/refactor-examples/expected/sum_lib.hpp
+@@ -0,0 +1,54 @@
++#include <iostream>
++#include <memory>
++#include <utility>
++
++// The declaration of virtual function foo is translated to this. If declaration
++// is also definition, then fallback case foo(...) is also a definition.
++// Functions are declared virtual as a whole instead of by parameter, unlike
++// Bjarne's paper on multimethods (the latter is harder to translate to
++// type-erasure, if possible at all).
++// inline void foo(...) { std::cout << "fallback case\n"; }
++
++// This Foo type may be accessed by the client with something like
++// std::open_variant<foo> where foo is the function declared as virtual.
++// Foo type is the main difference between runtime dispatch  and compile-time
++// (ADL-based) dispatch on open sum-types. In template code, the template type
++// parameter could be seen as having the same responsability as the Foo type in
++// type-erasure, that is, being a container for a family of (constrained) types.
++// Then ADL is in charge of compile-time binding (dispatch) in a comparable way
++// to runtime binding being handled through vtables.
++class Foo {
++public:
++  // NOTE: The template parameter could be constrained. For example, to ensure
++  // that the type indeed has the operations needed by the type-erasure.
++  template <typename T>
++  constexpr Foo(T &&X)
++      : WrappedParams(std::make_unique<
++                      FooModel<std::remove_cv_t<std::remove_reference_t<T>>>>(
++            std::forward<T>(X))) {}
++
++  template <typename T, size_t N>
++  constexpr Foo(T (&X)[N])
++      : WrappedParams(std::make_unique<FooModel<T (&)[N]>>(X)) {}
++
++  friend void foo(const Foo &X) { X.WrappedParams->callFoo(); }
++
++  struct FooConcept {
++    virtual ~FooConcept() {}
++    // return type cannot be deduced due to limitation on virtual functions
++    virtual void callFoo() const = 0;
++  };
++
++  // this is a fallback FooModel for defaulted and non handled cases
++  template <typename S> struct FooModel final : FooConcept {
++    template <typename U> FooModel(U &&X) : Params(std::forward<U>(X)) {}
++    template <typename U, size_t N> FooModel(U (&X)[N]) : Params(X) {}
++
++    void callFoo() const override { foo(Params); }
++
++  private:
++    S Params;
++  };
++
++  std::unique_ptr<FooConcept> WrappedParams;
++};
+diff --git a/refactor-examples/hello.cpp b/refactor-examples/hello.cpp
+new file mode 100644
+index 000000000..c8673fdee
+--- /dev/null
++++ b/refactor-examples/hello.cpp
+@@ -0,0 +1,12 @@
++//#include <iostream>
++
++#define virtual_concept class __attribute__((annotate("virtual_concept")))
++
++
++virtual_concept X {
++};
++
++int main() {
++
++    return 0;
++}
+-- 
+2.34.1
+

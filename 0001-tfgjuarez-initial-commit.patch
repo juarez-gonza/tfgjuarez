@@ -1,0 +1,275 @@
+From 349d57d5eb8a639f4ff40f5eaab579527cf8c5b2 Mon Sep 17 00:00:00 2001
+From: Gonzalo Juarez <gjuarez@pa.uc3m.es>
+Date: Wed, 13 Sep 2023 19:48:16 +0200
+Subject: [PATCH 1/9] `tfgjuarez`: initial commit
+
+---
+ clang-tools-extra/clang-tidy/CMakeLists.txt   |  2 ++
+ .../clang-tidy/ClangTidyForceLinker.h         |  5 +++
+ .../clang-tidy/tfgjuarez/CMakeLists.txt       | 28 +++++++++++++++
+ .../tfgjuarez/TFGJuarezTidyModule.cpp         | 35 +++++++++++++++++++
+ .../tfgjuarez/TestRunRewriteCheck.cpp         | 35 +++++++++++++++++++
+ .../tfgjuarez/TestRunRewriteCheck.h           | 25 +++++++++++++
+ clang-tools-extra/docs/ReleaseNotes.rst       | 10 ++++++
+ .../docs/clang-tidy/checks/list.rst           |  1 +
+ .../checks/tfgjuarez/test-run-rewrite.rst     |  6 ++++
+ .../checkers/tfgjuarez/test-run-rewrite.cpp   | 14 ++++++++
+ 10 files changed, 161 insertions(+)
+ create mode 100644 clang-tools-extra/clang-tidy/tfgjuarez/CMakeLists.txt
+ create mode 100644 clang-tools-extra/clang-tidy/tfgjuarez/TFGJuarezTidyModule.cpp
+ create mode 100644 clang-tools-extra/clang-tidy/tfgjuarez/TestRunRewriteCheck.cpp
+ create mode 100644 clang-tools-extra/clang-tidy/tfgjuarez/TestRunRewriteCheck.h
+ create mode 100644 clang-tools-extra/docs/clang-tidy/checks/tfgjuarez/test-run-rewrite.rst
+ create mode 100644 clang-tools-extra/test/clang-tidy/checkers/tfgjuarez/test-run-rewrite.cpp
+
+diff --git a/clang-tools-extra/clang-tidy/CMakeLists.txt b/clang-tools-extra/clang-tidy/CMakeLists.txt
+index 8a953eeea..40967b826 100644
+--- a/clang-tools-extra/clang-tidy/CMakeLists.txt
++++ b/clang-tools-extra/clang-tidy/CMakeLists.txt
+@@ -76,6 +76,7 @@ add_subdirectory(performance)
+ add_subdirectory(portability)
+ add_subdirectory(readability)
+ add_subdirectory(zircon)
++add_subdirectory(tfgjuarez)
+ set(ALL_CLANG_TIDY_CHECKS
+   clangTidyAndroidModule
+   clangTidyAbseilModule
+@@ -100,6 +101,7 @@ set(ALL_CLANG_TIDY_CHECKS
+   clangTidyPortabilityModule
+   clangTidyReadabilityModule
+   clangTidyZirconModule
++  clangTidyTFGJuarezModule
+   )
+ if(CLANG_TIDY_ENABLE_STATIC_ANALYZER)
+   list(APPEND ALL_CLANG_TIDY_CHECKS clangTidyMPIModule)
+diff --git a/clang-tools-extra/clang-tidy/ClangTidyForceLinker.h b/clang-tools-extra/clang-tidy/ClangTidyForceLinker.h
+index adde9136f..e76bef3f2 100644
+--- a/clang-tools-extra/clang-tidy/ClangTidyForceLinker.h
++++ b/clang-tools-extra/clang-tidy/ClangTidyForceLinker.h
+@@ -137,6 +137,11 @@ extern volatile int ZirconModuleAnchorSource;
+ static int LLVM_ATTRIBUTE_UNUSED ZirconModuleAnchorDestination =
+     ZirconModuleAnchorSource;
+ 
++// This anchor is used to force the linker to link the TFGJuarezModule.
++extern volatile int TFGJuarezModuleAnchorSource;
++static int LLVM_ATTRIBUTE_UNUSED TFGJuarezModuleAnchorDestination =
++    TFGJuarezModuleAnchorSource;
++
+ } // namespace clang::tidy
+ 
+ #endif
+diff --git a/clang-tools-extra/clang-tidy/tfgjuarez/CMakeLists.txt b/clang-tools-extra/clang-tidy/tfgjuarez/CMakeLists.txt
+new file mode 100644
+index 000000000..268bcdcb2
+--- /dev/null
++++ b/clang-tools-extra/clang-tidy/tfgjuarez/CMakeLists.txt
+@@ -0,0 +1,28 @@
++set(LLVM_LINK_COMPONENTS
++  Support
++  FrontendOpenMP
++)
++
++add_clang_library(clangTidyTFGJuarezModule
++  TFGJuarezTidyModule.cpp
++  TestRunRewriteCheck.cpp
++
++  LINK_LIBS
++  clangTidy
++  clangTidyUtils
++  clangTidyReadabilityModule
++
++  DEPENDS
++  omp_gen
++)
++
++clang_target_link_libraries(clangTidyTFGJuarezModule
++  PRIVATE
++  clangAnalysis
++  clangAST
++  clangASTMatchers
++  clangBasic
++  clangLex
++  clangTooling
++  clangTransformer
++)
+diff --git a/clang-tools-extra/clang-tidy/tfgjuarez/TFGJuarezTidyModule.cpp b/clang-tools-extra/clang-tidy/tfgjuarez/TFGJuarezTidyModule.cpp
+new file mode 100644
+index 000000000..d40979a74
+--- /dev/null
++++ b/clang-tools-extra/clang-tidy/tfgjuarez/TFGJuarezTidyModule.cpp
+@@ -0,0 +1,35 @@
++//===------- TFGJuarezModule.cpp - clang-tidy -----------------------------===//
++//
++// Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
++// See https://llvm.org/LICENSE.txt for license information.
++// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
++//
++//===----------------------------------------------------------------------===//
++
++#include "../ClangTidy.h"
++#include "../ClangTidyModule.h"
++#include "../ClangTidyModuleRegistry.h"
++#include "TestRunRewriteCheck.h"
++
++namespace clang::tidy {
++namespace tfgjuarez {
++
++class TFGJuarezModule : public ClangTidyModule {
++public:
++  void addCheckFactories(ClangTidyCheckFactories &CheckFactories) override {
++    CheckFactories.registerCheck<TestRunRewriteCheck>(
++        "tfgjuarez-test-run-rewrite");
++  }
++};
++
++// Register the TFGJuarez using this statically initialized variable.
++static ClangTidyModuleRegistry::Add<TFGJuarezModule>
++    X("tfgjuarez-module", "Add TFG Juarez checks.");
++
++} // namespace tfgjuarez
++
++// This anchor is used to force the linker to link in the generated object file
++// and thus register the TFGJuarezModule.
++volatile int TFGJuarezModuleAnchorSource = 0;
++
++} // namespace clang::tidy
+diff --git a/clang-tools-extra/clang-tidy/tfgjuarez/TestRunRewriteCheck.cpp b/clang-tools-extra/clang-tidy/tfgjuarez/TestRunRewriteCheck.cpp
+new file mode 100644
+index 000000000..d64786ebb
+--- /dev/null
++++ b/clang-tools-extra/clang-tidy/tfgjuarez/TestRunRewriteCheck.cpp
+@@ -0,0 +1,35 @@
++//===--- TestRunRewriteCheck.cpp - clang-tidy -----------------------------===//
++//
++// Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
++// See https://llvm.org/LICENSE.txt for license information.
++// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
++//
++//===----------------------------------------------------------------------===//
++
++#include "TestRunRewriteCheck.h"
++#include "clang/AST/ASTContext.h"
++#include "clang/ASTMatchers/ASTMatchFinder.h"
++#include "clang/ASTMatchers/ASTMatchers.h"
++#include "clang/Tooling/Transformer/RangeSelector.h"
++#include "clang/Tooling/Transformer/RewriteRule.h"
++#include "clang/Tooling/Transformer/Stencil.h"
++
++using namespace clang::ast_matchers;
++
++namespace {
++using namespace clang::transformer;
++
++RewriteRuleWith<std::string> testRunRewriteCheckImpl() {
++  return makeRule(functionDecl(hasName("foo")).bind("x"), changeTo(cat("bar")),
++                  cat("change foo name to bar"));
++}
++
++} // namespace
++
++namespace clang::tidy::tfgjuarez {
++
++TestRunRewriteCheck::TestRunRewriteCheck(StringRef Name,
++                                         ClangTidyContext *Context)
++    : TransformerClangTidyCheck(testRunRewriteCheckImpl(), Name, Context) {}
++
++} // namespace clang::tidy::tfgjuarez
+diff --git a/clang-tools-extra/clang-tidy/tfgjuarez/TestRunRewriteCheck.h b/clang-tools-extra/clang-tidy/tfgjuarez/TestRunRewriteCheck.h
+new file mode 100644
+index 000000000..639524005
+--- /dev/null
++++ b/clang-tools-extra/clang-tidy/tfgjuarez/TestRunRewriteCheck.h
+@@ -0,0 +1,25 @@
++//===--- TestRunRewriteCheck.h - clang-tidy ---------------------*- C++ -*-===//
++//
++// Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
++// See https://llvm.org/LICENSE.txt for license information.
++// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
++//
++//===----------------------------------------------------------------------===//
++
++#ifndef LLVM_CLANG_TOOLS_EXTRA_CLANG_TIDY_TFGJUAREZ_TESTRUNREWRITECHECK_H
++#define LLVM_CLANG_TOOLS_EXTRA_CLANG_TIDY_TFGJUAREZ_TESTRUNREWRITECHECK_H
++
++#include "../utils/TransformerClangTidyCheck.h"
++
++namespace clang::tidy::tfgjuarez {
++
++/// https://clang.llvm.org/docs/ClangTransformerTutorial.html#reference-ranges-stencils-edits-rules
++/// http://clang.llvm.org/extra/clang-tidy/checks/tfgjuarez/test-run-rewrite.html
++class TestRunRewriteCheck : public utils::TransformerClangTidyCheck {
++public:
++  TestRunRewriteCheck(StringRef Name, ClangTidyContext *Context);
++};
++
++} // namespace clang::tidy::tfgjuarez
++
++#endif // LLVM_CLANG_TOOLS_EXTRA_CLANG_TIDY_TFGJUAREZ_TESTRUNREWRITECHECK_H
+diff --git a/clang-tools-extra/docs/ReleaseNotes.rst b/clang-tools-extra/docs/ReleaseNotes.rst
+index 434dcd955..4698df780 100644
+--- a/clang-tools-extra/docs/ReleaseNotes.rst
++++ b/clang-tools-extra/docs/ReleaseNotes.rst
+@@ -141,6 +141,16 @@ New checks
+   Warns when `empty()` is used on a range and the result is ignored. Suggests `clear()`
+   if it is an existing member function.
+ 
++- New :doc:`tfgjuarez-test-run-rewrite
++  <clang-tidy/checks/tfgjuarez/test-run-rewrite>` check.
++
++  FIXME: add release notes.
++
++- New :doc:`tfgjuarez-test-run-rewrite
++  <clang-tidy/checks/tfgjuarez/test-run-rewrite>` check.
++
++  FIXME: add release notes.
++
+ New check aliases
+ ^^^^^^^^^^^^^^^^^
+ 
+diff --git a/clang-tools-extra/docs/clang-tidy/checks/list.rst b/clang-tools-extra/docs/clang-tidy/checks/list.rst
+index ec59eb87a..7b2605b9d 100644
+--- a/clang-tools-extra/docs/clang-tidy/checks/list.rst
++++ b/clang-tools-extra/docs/clang-tidy/checks/list.rst
+@@ -367,6 +367,7 @@ Clang-Tidy Checks
+    `readability-uniqueptr-delete-release <readability/uniqueptr-delete-release.html>`_, "Yes"
+    `readability-uppercase-literal-suffix <readability/uppercase-literal-suffix.html>`_, "Yes"
+    `readability-use-anyofallof <readability/use-anyofallof.html>`_,
++   `tfgjuarez-test-run-rewrite <tfgjuarez/test-run-rewrite.html>`_, "Yes"
+    `zircon-temporary-objects <zircon/temporary-objects.html>`_,
+ 
+ 
+diff --git a/clang-tools-extra/docs/clang-tidy/checks/tfgjuarez/test-run-rewrite.rst b/clang-tools-extra/docs/clang-tidy/checks/tfgjuarez/test-run-rewrite.rst
+new file mode 100644
+index 000000000..53e42fe1a
+--- /dev/null
++++ b/clang-tools-extra/docs/clang-tidy/checks/tfgjuarez/test-run-rewrite.rst
+@@ -0,0 +1,6 @@
++.. title:: clang-tidy - tfgjuarez-test-run-rewrite
++
++tfgjuarez-test-run-rewrite
++==========================
++
++FIXME: Describe what patterns does the check detect and why. Give examples.
+diff --git a/clang-tools-extra/test/clang-tidy/checkers/tfgjuarez/test-run-rewrite.cpp b/clang-tools-extra/test/clang-tidy/checkers/tfgjuarez/test-run-rewrite.cpp
+new file mode 100644
+index 000000000..88b1fc321
+--- /dev/null
++++ b/clang-tools-extra/test/clang-tidy/checkers/tfgjuarez/test-run-rewrite.cpp
+@@ -0,0 +1,14 @@
++// RUN: %check_clang_tidy %s tfgjuarez-test-run-rewrite %t
++
++// FIXME: Add something that triggers the check here.
++void f();
++// CHECK-MESSAGES: :[[@LINE-1]]:6: warning: function 'f' is insufficiently awesome [tfgjuarez-test-run-rewrite]
++
++// FIXME: Verify the applied fix.
++//   * Make the CHECK patterns specific enough and try to make verified lines
++//     unique to avoid incorrect matches.
++//   * Use {{}} for regular expressions.
++// CHECK-FIXES: {{^}}void awesome_f();{{$}}
++
++// FIXME: Add something that doesn't trigger the check here.
++void awesome_f2();
+-- 
+2.34.1
+

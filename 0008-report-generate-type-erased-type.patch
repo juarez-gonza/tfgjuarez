@@ -1,0 +1,90 @@
+From 3954514ea6b576922e7fbd00e2bee195c753b9db Mon Sep 17 00:00:00 2001
+From: Gonzalo Juarez <gjuarez@pa.uc3m.es>
+Date: Fri, 15 Sep 2023 19:45:36 +0200
+Subject: [PATCH 8/9] `report`: generate type-erased type
+
+---
+ .../tfgjuarez/TestRunRewriteCheck.cpp         | 43 ++++++++++---------
+ 1 file changed, 22 insertions(+), 21 deletions(-)
+
+diff --git a/clang-tools-extra/clang-tidy/tfgjuarez/TestRunRewriteCheck.cpp b/clang-tools-extra/clang-tidy/tfgjuarez/TestRunRewriteCheck.cpp
+index cb2e7dbed..b3da9f22c 100644
+--- a/clang-tools-extra/clang-tidy/tfgjuarez/TestRunRewriteCheck.cpp
++++ b/clang-tools-extra/clang-tidy/tfgjuarez/TestRunRewriteCheck.cpp
+@@ -72,17 +72,8 @@ public:
+ char VirtualConceptDefinitionError::ID; // Used by inherited class.
+ 
+ // TODO:
+-// - Transform virtual concept declarations to friend member functions of
+-// struct.
+-// - Transform virtual concept declarations to member functions of inner Model
+-// struct.
+-// - Transform virtual concept declarations to member functions of inner Concept
+-// struct.
+-// NOTE:
+-// - The above items will probably be better done using post order traversal
+-// (left -> right -> root). Reducing results at each root.
+-// - TraverseCXXRecordDecl may also give more control over visiting behaviour.
+-// But it may require more coding.
++// - Generate code for includes if necessary (<memory> and <type_traits>
++// - Generate code for overloads declared after virtual concept definition.
+ 
+ class MapToVirtualConceptImpl
+     : public clang::RecursiveASTVisitor<MapToVirtualConceptImpl> {
+@@ -94,15 +85,27 @@ private:
+   std::string MemberFunctions = "";
+ 
+   void buildMemberFunction(clang::CXXMethodDecl *D) {
+-    llvm::raw_string_ostream FReader{MemberFunctions};
+-    FReader << "friend ";
+-    D->print(FReader);
+-    FReader << ";\n";
++    MemberFunctions +=
++        "friend " + D->getReturnType().getCanonicalType().getAsString() + " " +
++        D->getNameAsString() + "(const " + D->getParent()->getNameAsString() +
++        "& X) {\n"
++        "return X.WrappedParams->c" +
++        D->getNameAsString() +
++        "();"
++        "\n}\n";
+   }
+ 
+-  void buildInnerModel(clang::CXXMethodDecl *D) {}
++  void buildInnerModel(clang::CXXMethodDecl *D) {
++    InnerModel += D->getReturnType().getCanonicalType().getAsString() + " c" +
++                  D->getNameAsString() + "() const override { return " +
++                  D->getNameAsString() + "(Params); }\n";
++  }
+ 
+-  void buildInnerConcept(clang::CXXMethodDecl *D) {}
++  void buildInnerConcept(clang::CXXMethodDecl *D) {
++    InnerConcept += "virtual " +
++                    D->getReturnType().getCanonicalType().getAsString() + " c" +
++                    D->getNameAsString() + "() const = 0;\n";
++  }
+ 
+   std::string finishVirtualConcept(clang::CXXRecordDecl *D) {
+     auto ClassId = D->getNameAsString();
+@@ -124,8 +127,8 @@ private:
+            "(T (&X)[N])\n"
+            ": WrappedParams(std::make_unique<" +
+            ModelId + "<T (&)[N]>>(X)) {}\n\n" // Array constructor end
+-           + finishInnerConcept(ClassId) + finishInnerModel(ClassId) +
+-           "private: std::unique_ptr<" + ConceptId +
++           + std::move(MemberFunctions) + finishInnerConcept(ClassId) +
++           finishInnerModel(ClassId) + "private: std::unique_ptr<" + ConceptId +
+            "> WrappedParams;\n};\n"; // Pointer to base
+   }
+ 
+@@ -181,8 +184,6 @@ virtualConceptConsumer(const MatchFinder::MatchResult &Result) {
+   const auto *VCMatch = Result.Nodes.getNodeAs<clang::CXXRecordDecl>(VCBinding);
+   if (!VCMatch->hasDefinition() || VCMatch->hasDirectFields())
+     return llvm::make_error<VirtualConceptDefinitionError>();
+-  llvm::outs()
+-      << "\n================= virtualConceptConsumer() ==================\n";
+   return mapToVirtualConcept(const_cast<clang::CXXRecordDecl *>(VCMatch));
+ }
+ 
+-- 
+2.34.1
+

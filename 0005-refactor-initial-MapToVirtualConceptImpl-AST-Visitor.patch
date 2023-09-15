@@ -1,0 +1,82 @@
+From 55454017f8c4d630544b4f924d4b35e04e63e238 Mon Sep 17 00:00:00 2001
+From: Gonzalo Juarez <gjuarez@pa.uc3m.es>
+Date: Fri, 15 Sep 2023 10:36:14 +0200
+Subject: [PATCH 5/9] `refactor`: initial `MapToVirtualConceptImpl` AST Visitor
+
+---
+ .../tfgjuarez/TestRunRewriteCheck.cpp         | 40 +++++++++++++++++--
+ 1 file changed, 37 insertions(+), 3 deletions(-)
+
+diff --git a/clang-tools-extra/clang-tidy/tfgjuarez/TestRunRewriteCheck.cpp b/clang-tools-extra/clang-tidy/tfgjuarez/TestRunRewriteCheck.cpp
+index 0ffea266b..14bb7d603 100644
+--- a/clang-tools-extra/clang-tidy/tfgjuarez/TestRunRewriteCheck.cpp
++++ b/clang-tools-extra/clang-tidy/tfgjuarez/TestRunRewriteCheck.cpp
+@@ -9,6 +9,7 @@
+ #include "TestRunRewriteCheck.h"
+ #include "clang/AST/ASTContext.h"
+ #include "clang/AST/PrettyPrinter.h"
++#include "clang/AST/RecursiveASTVisitor.h"
+ #include "clang/ASTMatchers/ASTMatchFinder.h"
+ #include "clang/ASTMatchers/ASTMatchers.h"
+ #include "clang/Basic/AttrKinds.h"
+@@ -49,6 +50,7 @@ AST_MATCHER(clang::Decl, hasVirtualConceptAnnotation) {
+ }
+ 
+ // ========================== CONSUMER ==========================
++
+ static constexpr llvm::StringRef VCBinding = "VCBinding";
+ 
+ class VirtualConceptDefinitionError
+@@ -68,14 +70,46 @@ public:
+ };
+ char VirtualConceptDefinitionError::ID; // Used by inherited class.
+ 
++// TODO:
++// - Transform virtual concept declarations to friend member functions of
++// struct.
++// - Transform virtual concept declarations to member functions of inner Model
++// struct.
++// - Transform virtual concept declarations to member functions of inner Concept
++// struct.
++
++class MapToVirtualConceptImpl
++    : public clang::RecursiveASTVisitor<MapToVirtualConceptImpl> {
++private:
++  // Partial results that will be built *logically* in parallel.
++  // These are then accumulated in the `Result` variable.
++  std::string InnerModel = "";
++  std::string InnerConcept = "";
++  std::string MemberFunctions = "";
++
++public:
++  std::string Result = "";
++
++  bool VisitCXXMethodDecl(clang::CXXMethodDecl *D) {
++    D->dump();
++    llvm::outs() << "\n====================================================\n";
++    return true;
++  }
++};
++
++llvm::Expected<std::string> mapToVirtualConcept(clang::CXXRecordDecl *D) {
++  MapToVirtualConceptImpl M;
++  if (!M.TraverseCXXRecordDecl(const_cast<clang::CXXRecordDecl *>(D)))
++    return llvm::make_error<VirtualConceptDefinitionError>();
++  return M.Result;
++}
++
+ llvm::Expected<std::string>
+ virtualConceptConsumer(const MatchFinder::MatchResult &Result) {
+   const auto *VCMatch = Result.Nodes.getNodeAs<clang::CXXRecordDecl>(VCBinding);
+   if (!VCMatch->hasDefinition() || VCMatch->hasDirectFields())
+     return llvm::make_error<VirtualConceptDefinitionError>();
+-  VCMatch->print(llvm::outs());
+-  llvm::outs() << "\n";
+-  return "TestingStuff";
++  return mapToVirtualConcept(const_cast<clang::CXXRecordDecl *>(VCMatch));
+ }
+ 
+ // ========================== TRANSFORMER ==========================
+-- 
+2.34.1
+

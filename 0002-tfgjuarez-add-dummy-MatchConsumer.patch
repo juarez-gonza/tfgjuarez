@@ -1,0 +1,79 @@
+From 11c6e07cdf7f9ac36c95c40f82459e73168d0fde Mon Sep 17 00:00:00 2001
+From: Gonzalo Juarez <gjuarez@pa.uc3m.es>
+Date: Thu, 14 Sep 2023 11:16:59 +0200
+Subject: [PATCH 2/9] `tfgjuarez`: add dummy `MatchConsumer`
+
+---
+ .../tfgjuarez/TestRunRewriteCheck.cpp         | 44 ++++++++++++++++++-
+ 1 file changed, 42 insertions(+), 2 deletions(-)
+
+diff --git a/clang-tools-extra/clang-tidy/tfgjuarez/TestRunRewriteCheck.cpp b/clang-tools-extra/clang-tidy/tfgjuarez/TestRunRewriteCheck.cpp
+index d64786ebb..2f4307a14 100644
+--- a/clang-tools-extra/clang-tidy/tfgjuarez/TestRunRewriteCheck.cpp
++++ b/clang-tools-extra/clang-tidy/tfgjuarez/TestRunRewriteCheck.cpp
+@@ -8,20 +8,60 @@
+ 
+ #include "TestRunRewriteCheck.h"
+ #include "clang/AST/ASTContext.h"
++#include "clang/AST/PrettyPrinter.h"
+ #include "clang/ASTMatchers/ASTMatchFinder.h"
+ #include "clang/ASTMatchers/ASTMatchers.h"
++#include "clang/Basic/AttrKinds.h"
+ #include "clang/Tooling/Transformer/RangeSelector.h"
+ #include "clang/Tooling/Transformer/RewriteRule.h"
+ #include "clang/Tooling/Transformer/Stencil.h"
++#include "llvm/ADT/StringRef.h"
+ 
+ using namespace clang::ast_matchers;
+ 
+ namespace {
+ using namespace clang::transformer;
+ 
++// ========================== MATCHER ==========================
++
++std::string readAnnotation(const clang::Attr *A, clang::PrintingPolicy PP) {
++  assert(A->getKind() == clang::attr::Annotate);
++  std::string Str;
++  llvm::raw_string_ostream ReaderStream{Str};
++  A->printPretty(ReaderStream, PP);
++  return Str;
++}
++
++bool isVirtualConceptAttribute(const clang::Attr *A, clang::PrintingPolicy PP) {
++  return A->getKind() == clang::attr::Annotate &&
++         readAnnotation(A, PP).find("virtual_concept") != std::string::npos;
++}
++
++AST_MATCHER(clang::Decl, hasVirtualConceptAnnotation) {
++  auto PP = Node.getASTContext().getPrintingPolicy();
++  for (const auto *A : Node.attrs())
++    if (isVirtualConceptAttribute(A, PP))
++      return true;
++  return false;
++}
++
++// ========================== CONSUMER ==========================
++static constexpr llvm::StringRef VCBinding = "VCBinding";
++
++llvm::Expected<std::string>
++virtualConceptConsumer(const MatchFinder::MatchResult &Result) {
++  const auto *VCMatch = Result.Nodes.getNodeAs<clang::CXXRecordDecl>(VCBinding);
++  VCMatch->dump();
++  return "TestingStuff";
++}
++
++// ========================== TRANSFORMER ==========================
++
+ RewriteRuleWith<std::string> testRunRewriteCheckImpl() {
+-  return makeRule(functionDecl(hasName("foo")).bind("x"), changeTo(cat("bar")),
+-                  cat("change foo name to bar"));
++
++  return makeRule(cxxRecordDecl(hasVirtualConceptAnnotation()).bind(VCBinding),
++                  changeTo(run(virtualConceptConsumer)),
++                  cat("Generate code for virtual concept"));
+ }
+ 
+ } // namespace
+-- 
+2.34.1
+

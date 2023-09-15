@@ -1,0 +1,92 @@
+From cc095176b9df28c2cc502746a9280ac3d5511409 Mon Sep 17 00:00:00 2001
+From: Gonzalo Juarez <gjuarez@pa.uc3m.es>
+Date: Thu, 14 Sep 2023 17:25:29 +0200
+Subject: [PATCH 4/9] `refactor`: add `VirtualConceptDefinitionError`
+
+---
+ .../tfgjuarez/TestRunRewriteCheck.cpp         | 28 +++++++++++++++++--
+ refactor-examples/hello.cpp                   | 13 ++++-----
+ 2 files changed, 30 insertions(+), 11 deletions(-)
+
+diff --git a/clang-tools-extra/clang-tidy/tfgjuarez/TestRunRewriteCheck.cpp b/clang-tools-extra/clang-tidy/tfgjuarez/TestRunRewriteCheck.cpp
+index 2f4307a14..0ffea266b 100644
+--- a/clang-tools-extra/clang-tidy/tfgjuarez/TestRunRewriteCheck.cpp
++++ b/clang-tools-extra/clang-tidy/tfgjuarez/TestRunRewriteCheck.cpp
+@@ -16,6 +16,9 @@
+ #include "clang/Tooling/Transformer/RewriteRule.h"
+ #include "clang/Tooling/Transformer/Stencil.h"
+ #include "llvm/ADT/StringRef.h"
++#include "llvm/Object/Error.h"
++#include "llvm/Support/Error.h"
++#include <system_error>
+ 
+ using namespace clang::ast_matchers;
+ 
+@@ -48,20 +51,39 @@ AST_MATCHER(clang::Decl, hasVirtualConceptAnnotation) {
+ // ========================== CONSUMER ==========================
+ static constexpr llvm::StringRef VCBinding = "VCBinding";
+ 
++class VirtualConceptDefinitionError
++    : public llvm::ErrorInfo<VirtualConceptDefinitionError> {
++public:
++  static char ID;
++
++  void log(llvm::raw_ostream &OS) const override {
++    OS << "Bad virtual concept definition.";
++  }
++
++  std::error_code convertToErrorCode() const override {
++    return std::error_code(
++        static_cast<int>(llvm::object::object_error::parse_failed),
++        std::generic_category());
++  }
++};
++char VirtualConceptDefinitionError::ID; // Used by inherited class.
++
+ llvm::Expected<std::string>
+ virtualConceptConsumer(const MatchFinder::MatchResult &Result) {
+   const auto *VCMatch = Result.Nodes.getNodeAs<clang::CXXRecordDecl>(VCBinding);
+-  VCMatch->dump();
++  if (!VCMatch->hasDefinition() || VCMatch->hasDirectFields())
++    return llvm::make_error<VirtualConceptDefinitionError>();
++  VCMatch->print(llvm::outs());
++  llvm::outs() << "\n";
+   return "TestingStuff";
+ }
+ 
+ // ========================== TRANSFORMER ==========================
+ 
+ RewriteRuleWith<std::string> testRunRewriteCheckImpl() {
+-
+   return makeRule(cxxRecordDecl(hasVirtualConceptAnnotation()).bind(VCBinding),
+                   changeTo(run(virtualConceptConsumer)),
+-                  cat("Generate code for virtual concept"));
++                  cat("Generate code for virtual concept."));
+ }
+ 
+ } // namespace
+diff --git a/refactor-examples/hello.cpp b/refactor-examples/hello.cpp
+index c8673fdee..14d039da1 100644
+--- a/refactor-examples/hello.cpp
++++ b/refactor-examples/hello.cpp
+@@ -1,12 +1,9 @@
+-//#include <iostream>
+-
+-#define virtual_concept class __attribute__((annotate("virtual_concept")))
+-
++// #include <iostream>
++#define virtual_ __attribute__((annotate("virtual_concept")))
++#define virtual_concept class virtual_
+ 
+ virtual_concept X {
++  void foo(virtual_ X);
+ };
+ 
+-int main() {
+-
+-    return 0;
+-}
++int main() { return 0; }
+-- 
+2.34.1
+
