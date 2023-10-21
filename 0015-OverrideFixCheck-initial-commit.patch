@@ -1,0 +1,728 @@
+From e36efb0af88c7d4f5a82064e24f45eafe4603374 Mon Sep 17 00:00:00 2001
+From: Gonzalo Juarez <gjuarez@pa.uc3m.es>
+Date: Tue, 3 Oct 2023 16:14:49 +0200
+Subject: [PATCH 15/16] `OverrideFixCheck` initial commit
+
+---
+ .../clang-tidy/tfgjuarez/CMakeLists.txt       |   2 +-
+ .../clang-tidy/tfgjuarez/OverrideFixCheck.cpp | 199 ++++++++++++++++
+ .../clang-tidy/tfgjuarez/OverrideFixCheck.h   |  30 +++
+ .../tfgjuarez/TFGJuarezTidyModule.cpp         |   6 +-
+ .../tfgjuarez/TestRunRewriteCheck.cpp         | 225 ------------------
+ .../tfgjuarez/TestRunRewriteCheck.h           |  25 --
+ .../clang-tidy/tfgjuarez/VcFixCheck.cpp       |  11 +-
+ clang-tools-extra/docs/ReleaseNotes.rst       |   5 +
+ .../docs/clang-tidy/checks/list.rst           |   1 +
+ .../checks/tfgjuarez/override-fix.rst         |   6 +
+ .../checkers/tfgjuarez/override-fix.cpp       |  14 ++
+ refactor-examples/a.cpp                       |  40 ++++
+ refactor-examples/ov.sh                       |   3 +
+ refactor-examples/rt.sh                       |   3 -
+ 14 files changed, 303 insertions(+), 267 deletions(-)
+ create mode 100644 clang-tools-extra/clang-tidy/tfgjuarez/OverrideFixCheck.cpp
+ create mode 100644 clang-tools-extra/clang-tidy/tfgjuarez/OverrideFixCheck.h
+ delete mode 100644 clang-tools-extra/clang-tidy/tfgjuarez/TestRunRewriteCheck.cpp
+ delete mode 100644 clang-tools-extra/clang-tidy/tfgjuarez/TestRunRewriteCheck.h
+ create mode 100644 clang-tools-extra/docs/clang-tidy/checks/tfgjuarez/override-fix.rst
+ create mode 100644 clang-tools-extra/test/clang-tidy/checkers/tfgjuarez/override-fix.cpp
+ create mode 100644 refactor-examples/a.cpp
+ create mode 100755 refactor-examples/ov.sh
+ delete mode 100755 refactor-examples/rt.sh
+
+diff --git a/clang-tools-extra/clang-tidy/tfgjuarez/CMakeLists.txt b/clang-tools-extra/clang-tidy/tfgjuarez/CMakeLists.txt
+index db7714138..33414a8ca 100644
+--- a/clang-tools-extra/clang-tidy/tfgjuarez/CMakeLists.txt
++++ b/clang-tools-extra/clang-tidy/tfgjuarez/CMakeLists.txt
+@@ -5,8 +5,8 @@ set(LLVM_LINK_COMPONENTS
+ 
+ add_clang_library(clangTidyTFGJuarezModule
+   TFGJuarezTidyModule.cpp
+-  TestRunRewriteCheck.cpp
+   VcFixCheck.cpp
++  OverrideFixCheck.cpp
+ 
+   LINK_LIBS
+   clangTidy
+diff --git a/clang-tools-extra/clang-tidy/tfgjuarez/OverrideFixCheck.cpp b/clang-tools-extra/clang-tidy/tfgjuarez/OverrideFixCheck.cpp
+new file mode 100644
+index 000000000..71bffc585
+--- /dev/null
++++ b/clang-tools-extra/clang-tidy/tfgjuarez/OverrideFixCheck.cpp
+@@ -0,0 +1,199 @@
++//===--- OverrideFixCheck.cpp - clang-tidy --------------------------------===//
++//
++// Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
++// See https://llvm.org/LICENSE.txt for license information.
++// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
++//
++//===----------------------------------------------------------------------===//
++
++#include "OverrideFixCheck.h"
++#include "clang/AST/ASTContext.h"
++#include "clang/AST/Decl.h"
++#include "clang/AST/DeclBase.h"
++#include "clang/AST/DeclCXX.h"
++#include "clang/AST/DeclarationName.h"
++#include "clang/AST/Expr.h"
++#include "clang/ASTMatchers/ASTMatchFinder.h"
++#include "llvm/ADT/StringRef.h"
++
++using namespace clang::ast_matchers;
++
++// Short names used:
++// - "Vc" stands for "virtual concept".
++// - "Ow" stands for "overwrite" or "overwriter".
++
++namespace {
++
++static constexpr llvm::StringRef AnnotationPattern =
++    "_virtual_concept_override_";
++
++// ========================== ATTRIBUTE UTILITIES ==========================
++
++std::string readAnnotation(const clang::Attr *A, clang::PrintingPolicy PP) {
++  assert(A->getKind() == clang::attr::Annotate);
++  std::string Str;
++  llvm::raw_string_ostream ReaderStream{Str};
++  A->printPretty(ReaderStream, PP);
++  return Str;
++}
++
++bool isVcOwAttr(const clang::Attr *A, clang::PrintingPolicy PP) {
++  return A->getKind() == clang::attr::Annotate &&
++         readAnnotation(A, PP).find(AnnotationPattern) != std::string::npos;
++}
++
++std::string vcOwAttrToVcName(const clang::Attr *A, clang::PrintingPolicy PP) {
++  // Match part before `Annotation Pattern` (the "type-erasure" name).
++  assert(A->getKind() == clang::attr::Annotate);
++  auto Annotation = readAnnotation(A, PP);
++  constexpr auto From = sizeof("__attribute__((annotate(\"");
++  auto Count = Annotation.find(AnnotationPattern, From) - From;
++  return Annotation.substr(From, Count);
++}
++
++std::string vcOwAttrToOwName(const clang::Attr *A, clang::PrintingPolicy PP) {
++  // Match part after `Annotation Pattern` (the "overwriting" name).
++  assert(A->getKind() == clang::attr::Annotate);
++  auto Annotation = readAnnotation(A, PP);
++  auto From = Annotation.find(AnnotationPattern) + AnnotationPattern.size();
++  auto Count = Annotation.size() - (From + sizeof("\")))") - 1);
++  return Annotation.substr(From, Count);
++}
++
++std::string vcOwToVcName(const clang::NamespaceDecl &D) {
++  auto PP = D.getASTContext().getPrintingPolicy();
++  for (const auto *A : D.attrs())
++    if (isVcOwAttr(A, PP))
++      return vcOwAttrToVcName(A, PP);
++
++  llvm_unreachable(
++      "Precondition violated: this function must be called when it is known "
++      "that the virtual_concept_override attribute is present in the "
++      "attributes list");
++}
++
++std::string vcOwToOwName(const clang::NamespaceDecl &D) {
++  auto PP = D.getASTContext().getPrintingPolicy();
++  for (const auto *A : D.attrs())
++    if (isVcOwAttr(A, PP))
++      return vcOwAttrToOwName(A, PP);
++
++  llvm_unreachable(
++      "Precondition violated: this function must be called when it is known "
++      "that the virtual_concept_override attribute is present in the "
++      "attributes list");
++}
++
++bool isVcOwDecl(const clang::Decl &D) {
++  auto PP = D.getASTContext().getPrintingPolicy();
++  for (const auto *A : D.attrs())
++    if (isVcOwAttr(A, PP))
++      return true;
++  return false;
++}
++
++// ========================== CODE GENERATION ==========================
++
++std::string buildExplicitModel(const clang::CXXRecordDecl &VC,
++                               const clang::NamespaceDecl &OW) {
++  for (clang::Decl *X : VC.decls())
++    if (auto *F = llvm::dyn_cast<clang::CXXMethodDecl>(X);
++        F != nullptr && !F->isImplicit())
++      llvm::outs() << F->getQualifiedNameAsString() << "\n";
++  // TODO: instantiate functions using the overwriting type (use vcOwToOwName()
++  // to get it as a string).
++  return "";
++}
++
++// ========================== NAME LOOKUP ==========================
++
++// This lookup currently works:
++// namespace NameSpacey {
++//   virtual_concept X {
++//   void foo(virtual_ X);
++// }
++// override_concept(X, int) {
++//   void foo(int)
++// }
++// But this does not:
++// namespace NameSpacey {
++//   virtual_concept X {
++//   void foo(virtual_ X);
++//   };
++// }
++// namespace Y {
++// override_concept(X, int) {
++//   void foo(int)
++// };
++// }
++// i.e.: lookup currently does not support peeking parent declaration
++// contexts. Only siblings and children declaration contexts.
++
++const clang::NamedDecl *declLookup(const clang::DeclContext &DC,
++                                   clang::StringRef DeclName) {
++
++  auto Eq = [&DeclName](const clang::NamedDecl &ND) {
++    return ND.getDeclName().isIdentifier() &&
++           std::move(ND.getQualifiedNameAsString()) == DeclName;
++  };
++
++  auto Rec =
++      [&Eq, &DeclName](const clang::NamedDecl *ND) -> const clang::NamedDecl * {
++    if (ND == nullptr) // Base case A: null
++      return ND;
++    if (Eq(*ND)) // Base case B: found
++      return ND;
++    if (const auto *InnerDC = llvm::dyn_cast<clang::DeclContext>(ND);
++        InnerDC != nullptr) // Recursive case: recurse through inner DeclContext
++      return declLookup(*InnerDC, DeclName);
++    return nullptr; // Otherwise...
++  };
++
++  for (const clang::Decl *D : DC.decls())
++    if (const clang::NamedDecl *ND = Rec(llvm::dyn_cast<clang::NamedDecl>(D));
++        ND != nullptr)
++      return ND;
++
++  return nullptr;
++}
++
++const clang::CXXRecordDecl *lookupVc(const clang::NamespaceDecl &D,
++                                     std::string S) {
++  return llvm::cast<const clang::CXXRecordDecl>(
++      declLookup(*D.getDeclContext(), S));
++}
++
++const clang::CXXRecordDecl *getVcRecordDecl(const clang::NamespaceDecl &D) {
++  return lookupVc(D, vcOwToVcName(D));
++}
++
++// ========================== MATCHER ==========================
++
++AST_MATCHER(clang::Decl, hasVcOwAttr) { return isVcOwDecl(Node); }
++
++} // namespace
++
++namespace clang::tidy::tfgjuarez {
++
++static constexpr StringRef OverrideBinding = "OverrideBinding";
++
++void OverrideFixCheck::registerMatchers(MatchFinder *Finder) {
++  Finder->addMatcher(namespaceDecl(hasVcOwAttr()).bind(OverrideBinding), this);
++}
++
++void OverrideFixCheck::check(const MatchFinder::MatchResult &Result) {
++  const auto *D = Result.Nodes.getNodeAs<NamespaceDecl>(OverrideBinding);
++  if (D == nullptr)
++    return;
++
++  const auto *RD = getVcRecordDecl(*D);
++  if (RD == nullptr) {
++    diag(D->getBeginLoc(), "Virtual Concept %0 does not exist")
++        << vcOwToVcName(*D);
++    return;
++  }
++  std::string Code = buildExplicitModel(*RD, *D);
++  return;
++}
++
++} // namespace clang::tidy::tfgjuarez
+diff --git a/clang-tools-extra/clang-tidy/tfgjuarez/OverrideFixCheck.h b/clang-tools-extra/clang-tidy/tfgjuarez/OverrideFixCheck.h
+new file mode 100644
+index 000000000..08f13fc7a
+--- /dev/null
++++ b/clang-tools-extra/clang-tidy/tfgjuarez/OverrideFixCheck.h
+@@ -0,0 +1,30 @@
++//===--- OverrideFixCheck.h - clang-tidy ------------------------*- C++ -*-===//
++//
++// Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
++// See https://llvm.org/LICENSE.txt for license information.
++// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
++//
++//===----------------------------------------------------------------------===//
++
++#ifndef LLVM_CLANG_TOOLS_EXTRA_CLANG_TIDY_TFGJUAREZ_OVERRIDEFIXCHECK_H
++#define LLVM_CLANG_TOOLS_EXTRA_CLANG_TIDY_TFGJUAREZ_OVERRIDEFIXCHECK_H
++
++#include "../ClangTidyCheck.h"
++
++namespace clang::tidy::tfgjuarez {
++
++/// FIXME: Write a short description.
++///
++/// For the user-facing documentation see:
++/// http://clang.llvm.org/extra/clang-tidy/checks/tfgjuarez/override-fix.html
++class OverrideFixCheck : public ClangTidyCheck {
++public:
++  OverrideFixCheck(StringRef Name, ClangTidyContext *Context)
++      : ClangTidyCheck(Name, Context) {}
++  void registerMatchers(ast_matchers::MatchFinder *Finder) override;
++  void check(const ast_matchers::MatchFinder::MatchResult &Result) override;
++};
++
++} // namespace clang::tidy::tfgjuarez
++
++#endif // LLVM_CLANG_TOOLS_EXTRA_CLANG_TIDY_TFGJUAREZ_OVERRIDEFIXCHECK_H
+diff --git a/clang-tools-extra/clang-tidy/tfgjuarez/TFGJuarezTidyModule.cpp b/clang-tools-extra/clang-tidy/tfgjuarez/TFGJuarezTidyModule.cpp
+index e6c200262..debb960e4 100644
+--- a/clang-tools-extra/clang-tidy/tfgjuarez/TFGJuarezTidyModule.cpp
++++ b/clang-tools-extra/clang-tidy/tfgjuarez/TFGJuarezTidyModule.cpp
+@@ -9,7 +9,7 @@
+ #include "../ClangTidy.h"
+ #include "../ClangTidyModule.h"
+ #include "../ClangTidyModuleRegistry.h"
+-#include "TestRunRewriteCheck.h"
++#include "OverrideFixCheck.h"
+ #include "VcFixCheck.h"
+ 
+ namespace clang::tidy {
+@@ -18,8 +18,8 @@ namespace tfgjuarez {
+ class TFGJuarezModule : public ClangTidyModule {
+ public:
+   void addCheckFactories(ClangTidyCheckFactories &CheckFactories) override {
+-    CheckFactories.registerCheck<TestRunRewriteCheck>(
+-        "tfgjuarez-test-run-rewrite");
++    CheckFactories.registerCheck<OverrideFixCheck>(
++        "tfgjuarez-override-fix");
+     CheckFactories.registerCheck<VcFixCheck>(
+         "tfgjuarez-vc-fix");
+   }
+diff --git a/clang-tools-extra/clang-tidy/tfgjuarez/TestRunRewriteCheck.cpp b/clang-tools-extra/clang-tidy/tfgjuarez/TestRunRewriteCheck.cpp
+deleted file mode 100644
+index ce6d600bb..000000000
+--- a/clang-tools-extra/clang-tidy/tfgjuarez/TestRunRewriteCheck.cpp
++++ /dev/null
+@@ -1,225 +0,0 @@
+-//===--- TestRunRewriteCheck.cpp - clang-tidy -----------------------------===//
+-//
+-// Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
+-// See https://llvm.org/LICENSE.txt for license information.
+-// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
+-//
+-//===----------------------------------------------------------------------===//
+-
+-#include "TestRunRewriteCheck.h"
+-#include "clang/AST/ASTContext.h"
+-#include "clang/AST/DeclCXX.h"
+-#include "clang/AST/PrettyPrinter.h"
+-#include "clang/AST/RecursiveASTVisitor.h"
+-#include "clang/ASTMatchers/ASTMatchFinder.h"
+-#include "clang/ASTMatchers/ASTMatchers.h"
+-#include "clang/Basic/AttrKinds.h"
+-#include "clang/Tooling/Transformer/RangeSelector.h"
+-#include "clang/Tooling/Transformer/RewriteRule.h"
+-#include "clang/Tooling/Transformer/Stencil.h"
+-#include "llvm/ADT/StringRef.h"
+-#include "llvm/Object/Error.h"
+-#include "llvm/Support/Error.h"
+-#include <system_error>
+-
+-using namespace clang::ast_matchers;
+-
+-namespace {
+-using namespace clang::transformer;
+-
+-// ========================== MATCHER ==========================
+-
+-std::string readAnnotation(const clang::Attr *A, clang::PrintingPolicy PP) {
+-  assert(A->getKind() == clang::attr::Annotate);
+-  std::string Str;
+-  llvm::raw_string_ostream ReaderStream{Str};
+-  A->printPretty(ReaderStream, PP);
+-  return Str;
+-}
+-
+-bool isVirtualConceptAttribute(const clang::Attr *A, clang::PrintingPolicy PP) {
+-  return A->getKind() == clang::attr::Annotate &&
+-         readAnnotation(A, PP).find("virtual_concept") != std::string::npos;
+-}
+-
+-AST_MATCHER(clang::Decl, hasVirtualConceptAnnotation) {
+-  auto PP = Node.getASTContext().getPrintingPolicy();
+-  for (const auto *A : Node.attrs())
+-    if (isVirtualConceptAttribute(A, PP))
+-      return true;
+-  return false;
+-}
+-
+-// ========================== CONSUMER ==========================
+-
+-static constexpr const char *const VCBinding = "VCBinding";
+-
+-class VirtualConceptDefinitionError
+-    : public llvm::ErrorInfo<VirtualConceptDefinitionError> {
+-public:
+-  static char ID;
+-
+-  void log(llvm::raw_ostream &OS) const override {
+-    OS << "Bad virtual concept definition.";
+-  }
+-
+-  std::error_code convertToErrorCode() const override {
+-    return std::error_code(
+-        static_cast<int>(llvm::object::object_error::parse_failed),
+-        std::generic_category());
+-  }
+-};
+-char VirtualConceptDefinitionError::ID; // Used by inherited class.
+-
+-// TODO:
+-// - Generate code for includes if necessary (<memory> and <type_traits>
+-// - Generate code for overloads declared after virtual concept definition.
+-
+-class MapToVirtualConceptImpl
+-    : public clang::RecursiveASTVisitor<MapToVirtualConceptImpl> {
+-public:
+-  std::string Result = "";
+-
+-  MapToVirtualConceptImpl(clang::CXXRecordDecl *X) : VC{X} {}
+-
+-  bool shouldTraversePostOrder() const { return true; }
+-
+-  bool VisitCXXRecordDecl(clang::CXXRecordDecl *D) {
+-    Result = finishVirtualConcept(D);
+-    return true;
+-  }
+-
+-  bool VisitCXXMethodDecl(clang::CXXMethodDecl *D) {
+-    buildMemberFunction(D);
+-    buildInnerConcept(D);
+-    buildInnerModel(D);
+-    return true;
+-  }
+-
+-  bool VisitFriendDecl(clang::FriendDecl *D) {
+-    llvm::outs() << "Found a friend function\n";
+-    auto *Foo = D->getFriendDecl()->getAsFunction();
+-    buildMemberFunction(Foo);
+-    buildInnerConcept(Foo);
+-    buildInnerModel(Foo);
+-    return true;
+-  }
+-
+-private:
+-  // Partial results that will be built *logically* in parallel.
+-  // These are then accumulated in the `Result` variable.
+-  std::string InnerModel = "";
+-  std::string InnerConcept = "";
+-  std::string MemberFunctions = "";
+-  clang::CXXRecordDecl *VC = nullptr;
+-
+-  void buildMemberFunction(clang::FunctionDecl *D) {
+-    MemberFunctions += "friend " +
+-                       D->getReturnType().getCanonicalType().getAsString() +
+-                       " " + D->getNameAsString() + "(const " +
+-                       VC->getCanonicalDecl()->getNameAsString() +
+-                       "& X) {\n"
+-                       "return X.WrappedParams->c" +
+-                       D->getNameAsString() +
+-                       "();"
+-                       "\n}\n";
+-  }
+-
+-  void buildInnerModel(clang::FunctionDecl *D) {
+-    InnerModel += D->getReturnType().getCanonicalType().getAsString() + " c" +
+-                  D->getNameAsString() + "() const override { return " +
+-                  D->getNameAsString() + "(Params); }\n";
+-  }
+-
+-  void buildInnerConcept(clang::FunctionDecl *D) {
+-    InnerConcept += "virtual " +
+-                    D->getReturnType().getCanonicalType().getAsString() + " c" +
+-                    D->getNameAsString() + "() const = 0;\n";
+-  }
+-
+-  std::string finishVirtualConcept(clang::CXXRecordDecl *D) {
+-    auto ClassId = D->getNameAsString();
+-    auto ModelId = ClassId + "Model";
+-    auto ConceptId = ClassId + "Concept";
+-    return "virtual_concept " + ClassId +
+-           " {\n"
+-           "public:\n"
+-           "template<typename T> constexpr " + // Constructor begin
+-           ClassId +
+-           "(T &&X)\n"
+-           ": WrappedParams(std::make_unique<" +
+-           ModelId +
+-           "<std::remove_cv_t<std::remove_reference_t<T>>>>(std::forward<T>(X)"
+-           ")) {}\n\n"                                   // Constructor end
+-           "template<typename T, size_t N> constexpr " + // Array constructor
+-                                                         // begin
+-           ClassId +
+-           "(T (&X)[N])\n"
+-           ": WrappedParams(std::make_unique<" +
+-           ModelId + "<T (&)[N]>>(X)) {}\n\n" // Array constructor end
+-           + std::move(MemberFunctions) + finishInnerConcept(ClassId) +
+-           finishInnerModel(ClassId) + "private: std::unique_ptr<" + ConceptId +
+-           "> WrappedParams;\n};\n"; // Pointer to base
+-  }
+-
+-  std::string finishInnerModel(std::string ClassId) {
+-    auto ModelId = ClassId + "Model";
+-    auto ConceptId = ClassId + "Concept";
+-    return "template<typename S> struct " + ModelId + " final : " + ConceptId +
+-           " {\n"
+-           "template<typename U> " + // Constructor begin
+-           ModelId +
+-           "(U &&X) : Params(std::forward<U>(X)) {}\n" // Constructor end
+-           "template<typename U, size_t N> " + // Array constructor begin
+-           ModelId +
+-           "(U (&X)[N]) : Params(X) {}\n" // Array constructor end
+-           + std::move(InnerModel) + "private: S Params;\n};\n";
+-  }
+-
+-  std::string finishInnerConcept(std::string ClassId) {
+-    auto ConceptId = ClassId + "Concept";
+-    return "struct " + ConceptId +
+-           " {\n"
+-           "virtual ~" +
+-           ConceptId + "() {}\n" + std::move(InnerConcept) + "\n};\n";
+-  }
+-};
+-
+-llvm::Expected<std::string> mapToVirtualConcept(clang::CXXRecordDecl *D) {
+-  MapToVirtualConceptImpl M{D};
+-  if (!M.TraverseCXXRecordDecl(const_cast<clang::CXXRecordDecl *>(D)))
+-    return llvm::make_error<VirtualConceptDefinitionError>();
+-  return M.Result;
+-}
+-
+-llvm::Expected<std::string>
+-virtualConceptConsumer(const MatchFinder::MatchResult &Result) {
+-  const auto *VCMatch = Result.Nodes.getNodeAs<clang::CXXRecordDecl>(VCBinding);
+-  if (!VCMatch->hasDefinition() || VCMatch->hasDirectFields())
+-    return llvm::make_error<VirtualConceptDefinitionError>();
+-  return mapToVirtualConcept(const_cast<clang::CXXRecordDecl *>(VCMatch));
+-}
+-
+-// ========================== TRANSFORMER ==========================
+-
+-RewriteRuleWith<std::string> testRunRewriteCheckImpl() {
+-  auto R =
+-      makeRule(cxxRecordDecl(hasVirtualConceptAnnotation(), hasDefinition())
+-                   .bind(VCBinding),
+-               changeTo(node(VCBinding), run(virtualConceptConsumer)),
+-               cat("Generate code for virtual concept."));
+-  addInclude(R, "utility", IncludeFormat::Angled); // std::forward
+-  addInclude(R, "memory", IncludeFormat::Angled);  // std::unique_ptr
+-  addInclude(R, "type_traits", IncludeFormat::Angled);
+-  return R;
+-}
+-
+-} // namespace
+-
+-namespace clang::tidy::tfgjuarez {
+-
+-TestRunRewriteCheck::TestRunRewriteCheck(StringRef Name,
+-                                         ClangTidyContext *Context)
+-    : TransformerClangTidyCheck(testRunRewriteCheckImpl(), Name, Context) {}
+-
+-} // namespace clang::tidy::tfgjuarez
+diff --git a/clang-tools-extra/clang-tidy/tfgjuarez/TestRunRewriteCheck.h b/clang-tools-extra/clang-tidy/tfgjuarez/TestRunRewriteCheck.h
+deleted file mode 100644
+index 639524005..000000000
+--- a/clang-tools-extra/clang-tidy/tfgjuarez/TestRunRewriteCheck.h
++++ /dev/null
+@@ -1,25 +0,0 @@
+-//===--- TestRunRewriteCheck.h - clang-tidy ---------------------*- C++ -*-===//
+-//
+-// Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
+-// See https://llvm.org/LICENSE.txt for license information.
+-// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
+-//
+-//===----------------------------------------------------------------------===//
+-
+-#ifndef LLVM_CLANG_TOOLS_EXTRA_CLANG_TIDY_TFGJUAREZ_TESTRUNREWRITECHECK_H
+-#define LLVM_CLANG_TOOLS_EXTRA_CLANG_TIDY_TFGJUAREZ_TESTRUNREWRITECHECK_H
+-
+-#include "../utils/TransformerClangTidyCheck.h"
+-
+-namespace clang::tidy::tfgjuarez {
+-
+-/// https://clang.llvm.org/docs/ClangTransformerTutorial.html#reference-ranges-stencils-edits-rules
+-/// http://clang.llvm.org/extra/clang-tidy/checks/tfgjuarez/test-run-rewrite.html
+-class TestRunRewriteCheck : public utils::TransformerClangTidyCheck {
+-public:
+-  TestRunRewriteCheck(StringRef Name, ClangTidyContext *Context);
+-};
+-
+-} // namespace clang::tidy::tfgjuarez
+-
+-#endif // LLVM_CLANG_TOOLS_EXTRA_CLANG_TIDY_TFGJUAREZ_TESTRUNREWRITECHECK_H
+diff --git a/clang-tools-extra/clang-tidy/tfgjuarez/VcFixCheck.cpp b/clang-tools-extra/clang-tidy/tfgjuarez/VcFixCheck.cpp
+index ccfe123d1..91d9b01c9 100644
+--- a/clang-tools-extra/clang-tidy/tfgjuarez/VcFixCheck.cpp
++++ b/clang-tools-extra/clang-tidy/tfgjuarez/VcFixCheck.cpp
+@@ -38,15 +38,6 @@ public:
+     return true;
+   }
+ 
+-  bool VisitFriendDecl(clang::FriendDecl *D) {
+-    llvm::outs() << "Found a friend function\n";
+-    auto *Foo = D->getFriendDecl()->getAsFunction();
+-    buildMemberFunction(Foo);
+-    buildInnerConcept(Foo);
+-    buildInnerModel(Foo);
+-    return true;
+-  }
+-
+ private:
+   // Partial results that will be built *logically* in parallel.
+   // These are then accumulated in the `Result` variable.
+@@ -101,7 +92,7 @@ private:
+            ModelId + "<T (&)[N]>>(X)) {}\n\n" // Array constructor end
+            + std::move(MemberFunctions) + finishInnerConcept(ClassId) +
+            finishInnerModel(ClassId) + "private: std::unique_ptr<" + ConceptId +
+-           "> WrappedParams;\n};\n"; // Pointer to base
++           "> WrappedParams;\n}"; // Pointer to base
+   }
+ 
+   std::string finishInnerModel(std::string ClassId) {
+diff --git a/clang-tools-extra/docs/ReleaseNotes.rst b/clang-tools-extra/docs/ReleaseNotes.rst
+index 6a587cdfd..0a36312d0 100644
+--- a/clang-tools-extra/docs/ReleaseNotes.rst
++++ b/clang-tools-extra/docs/ReleaseNotes.rst
+@@ -141,6 +141,11 @@ New checks
+   Warns when `empty()` is used on a range and the result is ignored. Suggests `clear()`
+   if it is an existing member function.
+ 
++- New :doc:`tfgjuarez-override-fix
++  <clang-tidy/checks/tfgjuarez/override-fix>` check.
++
++  FIXME: add release notes.
++
+ - New :doc:`tfgjuarez-test-run-rewrite
+   <clang-tidy/checks/tfgjuarez/test-run-rewrite>` check.
+ 
+diff --git a/clang-tools-extra/docs/clang-tidy/checks/list.rst b/clang-tools-extra/docs/clang-tidy/checks/list.rst
+index 768ec88f7..c55850163 100644
+--- a/clang-tools-extra/docs/clang-tidy/checks/list.rst
++++ b/clang-tools-extra/docs/clang-tidy/checks/list.rst
+@@ -367,6 +367,7 @@ Clang-Tidy Checks
+    `readability-uniqueptr-delete-release <readability/uniqueptr-delete-release.html>`_, "Yes"
+    `readability-uppercase-literal-suffix <readability/uppercase-literal-suffix.html>`_, "Yes"
+    `readability-use-anyofallof <readability/use-anyofallof.html>`_,
++   `tfgjuarez-override-fix <tfgjuarez/override-fix.html>`_, "Yes"
+    `tfgjuarez-test-run-rewrite <tfgjuarez/test-run-rewrite.html>`_, "Yes"
+    `tfgjuarez-vc-fix <tfgjuarez/vc-fix.html>`_, "Yes"
+    `zircon-temporary-objects <zircon/temporary-objects.html>`_,
+diff --git a/clang-tools-extra/docs/clang-tidy/checks/tfgjuarez/override-fix.rst b/clang-tools-extra/docs/clang-tidy/checks/tfgjuarez/override-fix.rst
+new file mode 100644
+index 000000000..b78922423
+--- /dev/null
++++ b/clang-tools-extra/docs/clang-tidy/checks/tfgjuarez/override-fix.rst
+@@ -0,0 +1,6 @@
++.. title:: clang-tidy - tfgjuarez-override-fix
++
++tfgjuarez-override-fix
++======================
++
++FIXME: Describe what patterns does the check detect and why. Give examples.
+diff --git a/clang-tools-extra/test/clang-tidy/checkers/tfgjuarez/override-fix.cpp b/clang-tools-extra/test/clang-tidy/checkers/tfgjuarez/override-fix.cpp
+new file mode 100644
+index 000000000..2aeb78a87
+--- /dev/null
++++ b/clang-tools-extra/test/clang-tidy/checkers/tfgjuarez/override-fix.cpp
+@@ -0,0 +1,14 @@
++// RUN: %check_clang_tidy %s tfgjuarez-override-fix %t
++
++// FIXME: Add something that triggers the check here.
++void f();
++// CHECK-MESSAGES: :[[@LINE-1]]:6: warning: function 'f' is insufficiently awesome [tfgjuarez-override-fix]
++
++// FIXME: Verify the applied fix.
++//   * Make the CHECK patterns specific enough and try to make verified lines
++//     unique to avoid incorrect matches.
++//   * Use {{}} for regular expressions.
++// CHECK-FIXES: {{^}}void awesome_f();{{$}}
++
++// FIXME: Add something that doesn't trigger the check here.
++void awesome_f2();
+diff --git a/refactor-examples/a.cpp b/refactor-examples/a.cpp
+new file mode 100644
+index 000000000..385cdc6e7
+--- /dev/null
++++ b/refactor-examples/a.cpp
+@@ -0,0 +1,40 @@
++#include <iostream>
++#include <memory>
++#include <type_traits>
++#include <utility>
++
++#define virtual_ __attribute__((annotate("virtual_concept")))
++#define virtual_concept struct virtual_
++// #define override_(VCId)                                                        \
++//   __attribute__((annotate("virtual_concept_override_" #VCId)))
++
++#define override_concept(VCId, Type)                                           \
++  inline namespace                                                             \
++      __attribute__((annotate(#VCId "_virtual_concept_override_" #Type)))
++
++namespace NameSpacey {
++virtual_concept X {
++  void foo(virtual_ X);
++  void foobar(virtual_ X);
++};
++} // namespace NameSpacey
++
++override_concept(NameSpacey::X, int) {
++  void foo(int) { std::cout << "foo(int)\n"; }
++  void foobar(int) { std::cout << "foobar(int)\n"; }
++}
++
++// template <> struct NameSpacey::X::XModel<int> : XConcept {
++//   XModel(int X) : Params(X) {}
++//   void callFoo() const { Y::foo(Params); }
++
++// private:
++//   int Params;
++// };
++
++void bar(NameSpacey::X Val) { foo(Val); }
++
++int main() {
++  bar(1);
++  return 0;
++}
+diff --git a/refactor-examples/ov.sh b/refactor-examples/ov.sh
+new file mode 100755
+index 000000000..7b484e188
+--- /dev/null
++++ b/refactor-examples/ov.sh
+@@ -0,0 +1,3 @@
++#!/usr/bin/sh
++
++../refactor-build/bin/clang-tidy --checks="tfgjuarez-override-fix" --fix --fix-errors ${@}
+diff --git a/refactor-examples/rt.sh b/refactor-examples/rt.sh
+deleted file mode 100755
+index fa319ccb0..000000000
+--- a/refactor-examples/rt.sh
++++ /dev/null
+@@ -1,3 +0,0 @@
+-#!/usr/bin/sh
+-
+-../refactor-build/bin/clang-tidy --checks="tfgjuarez-test-run-rewrite" --fix --fix-errors ${@}
+-- 
+2.34.1
+

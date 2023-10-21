@@ -1,0 +1,36 @@
+From 18507a205fc4d0826e8a8bb276deaede8da2ac81 Mon Sep 17 00:00:00 2001
+From: Gonzalo Juarez <gjuarez@pa.uc3m.es>
+Date: Sat, 16 Sep 2023 13:34:45 +0200
+Subject: [PATCH 10/16] `refactor`: use `addInclude` for rule transformation
+
+---
+ .../clang-tidy/tfgjuarez/TestRunRewriteCheck.cpp    | 13 +++++++++----
+ 1 file changed, 9 insertions(+), 4 deletions(-)
+
+diff --git a/clang-tools-extra/clang-tidy/tfgjuarez/TestRunRewriteCheck.cpp b/clang-tools-extra/clang-tidy/tfgjuarez/TestRunRewriteCheck.cpp
+index b3da9f22c..0470562c3 100644
+--- a/clang-tools-extra/clang-tidy/tfgjuarez/TestRunRewriteCheck.cpp
++++ b/clang-tools-extra/clang-tidy/tfgjuarez/TestRunRewriteCheck.cpp
+@@ -190,10 +190,15 @@ virtualConceptConsumer(const MatchFinder::MatchResult &Result) {
+ // ========================== TRANSFORMER ==========================
+ 
+ RewriteRuleWith<std::string> testRunRewriteCheckImpl() {
+-  return makeRule(cxxRecordDecl(hasVirtualConceptAnnotation(), hasDefinition())
+-                      .bind(VCBinding),
+-                  changeTo(node(VCBinding), run(virtualConceptConsumer)),
+-                  cat("Generate code for virtual concept."));
++  auto R =
++      makeRule(cxxRecordDecl(hasVirtualConceptAnnotation(), hasDefinition())
++                   .bind(VCBinding),
++               changeTo(node(VCBinding), run(virtualConceptConsumer)),
++               cat("Generate code for virtual concept."));
++  addInclude(R, "utility", IncludeFormat::Angled); // std::forward
++  addInclude(R, "memory", IncludeFormat::Angled);  // std::unique_ptr
++  addInclude(R, "type_traits", IncludeFormat::Angled);
++  return R;
+ }
+ 
+ } // namespace
+-- 
+2.34.1
+

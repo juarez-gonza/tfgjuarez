@@ -1,0 +1,124 @@
+From bf05a60e986f265c3ce3780e16b8b0e08470ec6d Mon Sep 17 00:00:00 2001
+From: Gonzalo Juarez <gjuarez@pa.uc3m.es>
+Date: Sun, 22 Oct 2023 00:57:44 +0200
+Subject: [PATCH 16/16] `refactor`: `OverrideFixCheck` basic functionality
+
+---
+ .../clang-tidy/tfgjuarez/OverrideFixCheck.cpp | 43 +++++++++++++++++--
+ .../clang-tidy/tfgjuarez/VcFixCheck.cpp       |  2 +
+ refactor-examples/a.cpp                       |  4 +-
+ 3 files changed, 43 insertions(+), 6 deletions(-)
+
+diff --git a/clang-tools-extra/clang-tidy/tfgjuarez/OverrideFixCheck.cpp b/clang-tools-extra/clang-tidy/tfgjuarez/OverrideFixCheck.cpp
+index 71bffc585..bc6246e59 100644
+--- a/clang-tools-extra/clang-tidy/tfgjuarez/OverrideFixCheck.cpp
++++ b/clang-tools-extra/clang-tidy/tfgjuarez/OverrideFixCheck.cpp
+@@ -14,7 +14,10 @@
+ #include "clang/AST/DeclarationName.h"
+ #include "clang/AST/Expr.h"
+ #include "clang/ASTMatchers/ASTMatchFinder.h"
++#include "clang/Basic/SourceLocation.h"
++#include "llvm/ADT/STLExtras.h"
+ #include "llvm/ADT/StringRef.h"
++#include <numeric>
+ 
+ using namespace clang::ast_matchers;
+ 
+@@ -22,6 +25,10 @@ using namespace clang::ast_matchers;
+ // - "Vc" stands for "virtual concept".
+ // - "Ow" stands for "overwrite" or "overwriter".
+ 
++// TODO: check that all functions declared in VC are also declared in OW.
++// TODO: handle overrides for array type parameters.
++// TODO: handle more arguments.
++
+ namespace {
+ 
+ static constexpr llvm::StringRef AnnotationPattern =
+@@ -94,15 +101,38 @@ bool isVcOwDecl(const clang::Decl &D) {
+ 
+ // ========================== CODE GENERATION ==========================
+ 
++std::string buildOverridenMember(const clang::FunctionDecl &F) {
++  auto MemberName = "c" + F.getNameAsString();
++  return F.getReturnType().getAsString() + " " + MemberName +
++         "() const override { return " + F.getQualifiedNameAsString() +
++         "(Params); }";
++}
++
++std::string buildOverridenMembers(const clang::NamespaceDecl &OW) {
++  auto R = llvm::make_filter_range(OW.decls(), [](clang::Decl *X) {
++    return clang::isa<clang::FunctionDecl>(X);
++  });
++
++  return std::accumulate(
++      R.begin(), R.end(), std::string{}, [](std::string Acc, clang::Decl *X) {
++        return Acc + buildOverridenMember(*X->getAsFunction()) + "\n";
++      });
++}
++
+ std::string buildExplicitModel(const clang::CXXRecordDecl &VC,
+                                const clang::NamespaceDecl &OW) {
+   for (clang::Decl *X : VC.decls())
+     if (auto *F = llvm::dyn_cast<clang::CXXMethodDecl>(X);
+         F != nullptr && !F->isImplicit())
+       llvm::outs() << F->getQualifiedNameAsString() << "\n";
+-  // TODO: instantiate functions using the overwriting type (use vcOwToOwName()
+-  // to get it as a string).
+-  return "";
++
++  const auto OwName = vcOwToOwName(OW);
++  const auto VcName = VC.getNameAsString();
++  const auto ModelName = VcName + "Model";
++  return "template <> struct " + VC.getQualifiedNameAsString() +
++         "::" + ModelName + "<" + OwName + "> : " + VcName + "Concept {\n" +
++         ModelName + "(" + OwName + " X): Params(X) {}\n" +
++         buildOverridenMembers(OW) + "private: " + OwName + " Params;\n};\n";
+ }
+ 
+ // ========================== NAME LOOKUP ==========================
+@@ -192,7 +222,12 @@ void OverrideFixCheck::check(const MatchFinder::MatchResult &Result) {
+         << vcOwToVcName(*D);
+     return;
+   }
+-  std::string Code = buildExplicitModel(*RD, *D);
++
++  std::string Code = "\n" + buildExplicitModel(*RD, *D);
++  diag(D->getBeginLoc(),
++       "virtual concept override source2source transformation")
++      << FixItHint::CreateInsertion(D->getEndLoc().getLocWithOffset(1),
++                                    std::move(Code));
+   return;
+ }
+ 
+diff --git a/clang-tools-extra/clang-tidy/tfgjuarez/VcFixCheck.cpp b/clang-tools-extra/clang-tidy/tfgjuarez/VcFixCheck.cpp
+index 91d9b01c9..aed15b639 100644
+--- a/clang-tools-extra/clang-tidy/tfgjuarez/VcFixCheck.cpp
++++ b/clang-tools-extra/clang-tidy/tfgjuarez/VcFixCheck.cpp
+@@ -13,6 +13,8 @@
+ 
+ using namespace clang::ast_matchers;
+ 
++// TODO: handle more arguments.
++
+ namespace {
+ 
+ // ========================== CONSUMER ==========================
+diff --git a/refactor-examples/a.cpp b/refactor-examples/a.cpp
+index 385cdc6e7..fe2bcf87e 100644
+--- a/refactor-examples/a.cpp
++++ b/refactor-examples/a.cpp
+@@ -26,8 +26,8 @@ override_concept(NameSpacey::X, int) {
+ 
+ // template <> struct NameSpacey::X::XModel<int> : XConcept {
+ //   XModel(int X) : Params(X) {}
+-//   void callFoo() const { Y::foo(Params); }
+-
++//   void callFoo() const { foo(Params); }
++//   callFoobar() const { foobar(Params); }
+ // private:
+ //   int Params;
+ // };
+-- 
+2.34.1
+

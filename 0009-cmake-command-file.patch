@@ -1,7 +1,7 @@
 From ca47ed8b28ff76823ca0a8c9c1e2577994f2b137 Mon Sep 17 00:00:00 2001
 From: Gonzalo Juarez <gjuarez@pa.uc3m.es>
 Date: Fri, 15 Sep 2023 19:51:37 +0200
-Subject: [PATCH 9/9] cmake command file
+Subject: [PATCH 09/16] cmake command file
 
 ---
  .cmake.cmd.moa | 1 +

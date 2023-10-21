@@ -1,7 +1,7 @@
 From 11c6e07cdf7f9ac36c95c40f82459e73168d0fde Mon Sep 17 00:00:00 2001
 From: Gonzalo Juarez <gjuarez@pa.uc3m.es>
 Date: Thu, 14 Sep 2023 11:16:59 +0200
-Subject: [PATCH 2/9] `tfgjuarez`: add dummy `MatchConsumer`
+Subject: [PATCH 02/16] `tfgjuarez`: add dummy `MatchConsumer`
 
 ---
  .../tfgjuarez/TestRunRewriteCheck.cpp         | 44 ++++++++++++++++++-

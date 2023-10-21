@@ -1,0 +1,100 @@
+From 6f0f0d061b3d8d4c5ac1671c9735caa50ba4d153 Mon Sep 17 00:00:00 2001
+From: Gonzalo Juarez <gjuarez@pa.uc3m.es>
+Date: Sun, 1 Oct 2023 20:13:58 +0200
+Subject: [PATCH 12/16] allow definition of virtual concept functions with
+ friend keyword
+
+---
+ .../tfgjuarez/TestRunRewriteCheck.cpp         | 39 ++++++++++++-------
+ refactor-examples/rt.sh                       |  2 +-
+ 2 files changed, 27 insertions(+), 14 deletions(-)
+
+diff --git a/clang-tools-extra/clang-tidy/tfgjuarez/TestRunRewriteCheck.cpp b/clang-tools-extra/clang-tidy/tfgjuarez/TestRunRewriteCheck.cpp
+index 2db219c23..ce6d600bb 100644
+--- a/clang-tools-extra/clang-tidy/tfgjuarez/TestRunRewriteCheck.cpp
++++ b/clang-tools-extra/clang-tidy/tfgjuarez/TestRunRewriteCheck.cpp
+@@ -80,6 +80,8 @@ class MapToVirtualConceptImpl
+ public:
+   std::string Result = "";
+ 
++  MapToVirtualConceptImpl(clang::CXXRecordDecl *X) : VC{X} {}
++
+   bool shouldTraversePostOrder() const { return true; }
+ 
+   bool VisitCXXRecordDecl(clang::CXXRecordDecl *D) {
+@@ -94,31 +96,42 @@ public:
+     return true;
+   }
+ 
++  bool VisitFriendDecl(clang::FriendDecl *D) {
++    llvm::outs() << "Found a friend function\n";
++    auto *Foo = D->getFriendDecl()->getAsFunction();
++    buildMemberFunction(Foo);
++    buildInnerConcept(Foo);
++    buildInnerModel(Foo);
++    return true;
++  }
++
+ private:
+   // Partial results that will be built *logically* in parallel.
+   // These are then accumulated in the `Result` variable.
+   std::string InnerModel = "";
+   std::string InnerConcept = "";
+   std::string MemberFunctions = "";
+-
+-  void buildMemberFunction(clang::CXXMethodDecl *D) {
+-    MemberFunctions +=
+-        "friend " + D->getReturnType().getCanonicalType().getAsString() + " " +
+-        D->getNameAsString() + "(const " + D->getParent()->getNameAsString() +
+-        "& X) {\n"
+-        "return X.WrappedParams->c" +
+-        D->getNameAsString() +
+-        "();"
+-        "\n}\n";
++  clang::CXXRecordDecl *VC = nullptr;
++
++  void buildMemberFunction(clang::FunctionDecl *D) {
++    MemberFunctions += "friend " +
++                       D->getReturnType().getCanonicalType().getAsString() +
++                       " " + D->getNameAsString() + "(const " +
++                       VC->getCanonicalDecl()->getNameAsString() +
++                       "& X) {\n"
++                       "return X.WrappedParams->c" +
++                       D->getNameAsString() +
++                       "();"
++                       "\n}\n";
+   }
+ 
+-  void buildInnerModel(clang::CXXMethodDecl *D) {
++  void buildInnerModel(clang::FunctionDecl *D) {
+     InnerModel += D->getReturnType().getCanonicalType().getAsString() + " c" +
+                   D->getNameAsString() + "() const override { return " +
+                   D->getNameAsString() + "(Params); }\n";
+   }
+ 
+-  void buildInnerConcept(clang::CXXMethodDecl *D) {
++  void buildInnerConcept(clang::FunctionDecl *D) {
+     InnerConcept += "virtual " +
+                     D->getReturnType().getCanonicalType().getAsString() + " c" +
+                     D->getNameAsString() + "() const = 0;\n";
+@@ -173,7 +186,7 @@ private:
+ };
+ 
+ llvm::Expected<std::string> mapToVirtualConcept(clang::CXXRecordDecl *D) {
+-  MapToVirtualConceptImpl M;
++  MapToVirtualConceptImpl M{D};
+   if (!M.TraverseCXXRecordDecl(const_cast<clang::CXXRecordDecl *>(D)))
+     return llvm::make_error<VirtualConceptDefinitionError>();
+   return M.Result;
+diff --git a/refactor-examples/rt.sh b/refactor-examples/rt.sh
+index 5639cab21..fa319ccb0 100755
+--- a/refactor-examples/rt.sh
++++ b/refactor-examples/rt.sh
+@@ -1,3 +1,3 @@
+ #!/usr/bin/sh
+ 
+-../refactor-build/bin/clang-tidy -checks="tfgjuarez-test-run-rewrite" ${@}
++../refactor-build/bin/clang-tidy --checks="tfgjuarez-test-run-rewrite" --fix --fix-errors ${@}
+-- 
+2.34.1
+

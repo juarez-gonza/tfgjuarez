@@ -1,0 +1,372 @@
+From 4a13517afa5d81aa386a29731a201e09e570bf03 Mon Sep 17 00:00:00 2001
+From: Gonzalo Juarez <gjuarez@pa.uc3m.es>
+Date: Mon, 2 Oct 2023 10:52:46 +0200
+Subject: [PATCH 14/16] Move `TestRunRewriteCheck` code to `VCFixCheck`
+
+---
+ .../clang-tidy/tfgjuarez/CMakeLists.txt       |   1 +
+ .../tfgjuarez/TFGJuarezTidyModule.cpp         |   3 +
+ .../clang-tidy/tfgjuarez/VcFixCheck.cpp       | 194 ++++++++++++++++++
+ .../clang-tidy/tfgjuarez/VcFixCheck.h         |  39 ++++
+ clang-tools-extra/docs/ReleaseNotes.rst       |   5 +
+ .../docs/clang-tidy/checks/list.rst           |   1 +
+ .../clang-tidy/checks/tfgjuarez/vc-fix.rst    |   6 +
+ .../clang-tidy/checkers/tfgjuarez/vc-fix.cpp  |  14 ++
+ refactor-examples/vc.sh                       |   3 +
+ 9 files changed, 266 insertions(+)
+ create mode 100644 clang-tools-extra/clang-tidy/tfgjuarez/VcFixCheck.cpp
+ create mode 100644 clang-tools-extra/clang-tidy/tfgjuarez/VcFixCheck.h
+ create mode 100644 clang-tools-extra/docs/clang-tidy/checks/tfgjuarez/vc-fix.rst
+ create mode 100644 clang-tools-extra/test/clang-tidy/checkers/tfgjuarez/vc-fix.cpp
+ create mode 100755 refactor-examples/vc.sh
+
+diff --git a/clang-tools-extra/clang-tidy/tfgjuarez/CMakeLists.txt b/clang-tools-extra/clang-tidy/tfgjuarez/CMakeLists.txt
+index 268bcdcb2..db7714138 100644
+--- a/clang-tools-extra/clang-tidy/tfgjuarez/CMakeLists.txt
++++ b/clang-tools-extra/clang-tidy/tfgjuarez/CMakeLists.txt
+@@ -6,6 +6,7 @@ set(LLVM_LINK_COMPONENTS
+ add_clang_library(clangTidyTFGJuarezModule
+   TFGJuarezTidyModule.cpp
+   TestRunRewriteCheck.cpp
++  VcFixCheck.cpp
+ 
+   LINK_LIBS
+   clangTidy
+diff --git a/clang-tools-extra/clang-tidy/tfgjuarez/TFGJuarezTidyModule.cpp b/clang-tools-extra/clang-tidy/tfgjuarez/TFGJuarezTidyModule.cpp
+index d40979a74..e6c200262 100644
+--- a/clang-tools-extra/clang-tidy/tfgjuarez/TFGJuarezTidyModule.cpp
++++ b/clang-tools-extra/clang-tidy/tfgjuarez/TFGJuarezTidyModule.cpp
+@@ -10,6 +10,7 @@
+ #include "../ClangTidyModule.h"
+ #include "../ClangTidyModuleRegistry.h"
+ #include "TestRunRewriteCheck.h"
++#include "VcFixCheck.h"
+ 
+ namespace clang::tidy {
+ namespace tfgjuarez {
+@@ -19,6 +20,8 @@ public:
+   void addCheckFactories(ClangTidyCheckFactories &CheckFactories) override {
+     CheckFactories.registerCheck<TestRunRewriteCheck>(
+         "tfgjuarez-test-run-rewrite");
++    CheckFactories.registerCheck<VcFixCheck>(
++        "tfgjuarez-vc-fix");
+   }
+ };
+ 
+diff --git a/clang-tools-extra/clang-tidy/tfgjuarez/VcFixCheck.cpp b/clang-tools-extra/clang-tidy/tfgjuarez/VcFixCheck.cpp
+new file mode 100644
+index 000000000..ccfe123d1
+--- /dev/null
++++ b/clang-tools-extra/clang-tidy/tfgjuarez/VcFixCheck.cpp
+@@ -0,0 +1,194 @@
++//===--- VcFixCheck.cpp - clang-tidy --------------------------------------===//
++//
++// Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
++// See https://llvm.org/LICENSE.txt for license information.
++// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
++//
++//===----------------------------------------------------------------------===//
++
++#include "VcFixCheck.h"
++#include "clang/AST/ASTContext.h"
++#include "clang/AST/RecursiveASTVisitor.h"
++#include "clang/ASTMatchers/ASTMatchFinder.h"
++
++using namespace clang::ast_matchers;
++
++namespace {
++
++// ========================== CONSUMER ==========================
++
++class MapToVirtualConceptImpl
++    : public clang::RecursiveASTVisitor<MapToVirtualConceptImpl> {
++public:
++  std::string Result = "";
++
++  MapToVirtualConceptImpl(clang::CXXRecordDecl *X) : VC{X} {}
++
++  bool shouldTraversePostOrder() const { return true; }
++
++  bool VisitCXXRecordDecl(clang::CXXRecordDecl *D) {
++    Result = finishVirtualConcept(D);
++    return true;
++  }
++
++  bool VisitCXXMethodDecl(clang::CXXMethodDecl *D) {
++    buildMemberFunction(D);
++    buildInnerConcept(D);
++    buildInnerModel(D);
++    return true;
++  }
++
++  bool VisitFriendDecl(clang::FriendDecl *D) {
++    llvm::outs() << "Found a friend function\n";
++    auto *Foo = D->getFriendDecl()->getAsFunction();
++    buildMemberFunction(Foo);
++    buildInnerConcept(Foo);
++    buildInnerModel(Foo);
++    return true;
++  }
++
++private:
++  // Partial results that will be built *logically* in parallel.
++  // These are then accumulated in the `Result` variable.
++  std::string InnerModel = "";
++  std::string InnerConcept = "";
++  std::string MemberFunctions = "";
++  clang::CXXRecordDecl *VC = nullptr;
++
++  void buildMemberFunction(clang::FunctionDecl *D) {
++    MemberFunctions += "friend " +
++                       D->getReturnType().getCanonicalType().getAsString() +
++                       " " + D->getNameAsString() + "(const " +
++                       VC->getCanonicalDecl()->getNameAsString() +
++                       "& X) {\n"
++                       "return X.WrappedParams->c" +
++                       D->getNameAsString() +
++                       "();"
++                       "\n}\n";
++  }
++
++  void buildInnerModel(clang::FunctionDecl *D) {
++    InnerModel += D->getReturnType().getCanonicalType().getAsString() + " c" +
++                  D->getNameAsString() + "() const override { return " +
++                  D->getNameAsString() + "(Params); }\n";
++  }
++
++  void buildInnerConcept(clang::FunctionDecl *D) {
++    InnerConcept += "virtual " +
++                    D->getReturnType().getCanonicalType().getAsString() + " c" +
++                    D->getNameAsString() + "() const = 0;\n";
++  }
++
++  std::string finishVirtualConcept(clang::CXXRecordDecl *D) {
++    auto ClassId = D->getNameAsString();
++    auto ModelId = ClassId + "Model";
++    auto ConceptId = ClassId + "Concept";
++    return "virtual_concept " + ClassId +
++           " {\n"
++           "public:\n"
++           "template<typename T> constexpr " + // Constructor begin
++           ClassId +
++           "(T &&X)\n"
++           ": WrappedParams(std::make_unique<" +
++           ModelId +
++           "<std::remove_cv_t<std::remove_reference_t<T>>>>(std::forward<T>(X)"
++           ")) {}\n\n"                                   // Constructor end
++           "template<typename T, size_t N> constexpr " + // Array constructor
++                                                         // begin
++           ClassId +
++           "(T (&X)[N])\n"
++           ": WrappedParams(std::make_unique<" +
++           ModelId + "<T (&)[N]>>(X)) {}\n\n" // Array constructor end
++           + std::move(MemberFunctions) + finishInnerConcept(ClassId) +
++           finishInnerModel(ClassId) + "private: std::unique_ptr<" + ConceptId +
++           "> WrappedParams;\n};\n"; // Pointer to base
++  }
++
++  std::string finishInnerModel(std::string ClassId) {
++    auto ModelId = ClassId + "Model";
++    auto ConceptId = ClassId + "Concept";
++    return "template<typename S> struct " + ModelId + " final : " + ConceptId +
++           " {\n"
++           "template<typename U> " + // Constructor begin
++           ModelId +
++           "(U &&X) : Params(std::forward<U>(X)) {}\n" // Constructor end
++           "template<typename U, size_t N> " + // Array constructor begin
++           ModelId +
++           "(U (&X)[N]) : Params(X) {}\n" // Array constructor end
++           + std::move(InnerModel) + "private: S Params;\n};\n";
++  }
++
++  std::string finishInnerConcept(std::string ClassId) {
++    auto ConceptId = ClassId + "Concept";
++    return "struct " + ConceptId +
++           " {\n"
++           "virtual ~" +
++           ConceptId + "() {}\n" + std::move(InnerConcept) + "\n};\n";
++  }
++};
++
++std::optional<std::string> mapToVirtualConcept(clang::CXXRecordDecl *D) {
++  MapToVirtualConceptImpl M{D};
++  if (!M.TraverseCXXRecordDecl(const_cast<clang::CXXRecordDecl *>(D)))
++    return std::nullopt;
++  return M.Result;
++}
++
++// ========================== MATCHER ==========================
++
++std::string readAnnotation(const clang::Attr *A, clang::PrintingPolicy PP) {
++  assert(A->getKind() == clang::attr::Annotate);
++  std::string Str;
++  llvm::raw_string_ostream ReaderStream{Str};
++  A->printPretty(ReaderStream, PP);
++  return Str;
++}
++
++bool isVirtualConceptAttribute(const clang::Attr *A, clang::PrintingPolicy PP) {
++  return A->getKind() == clang::attr::Annotate &&
++         readAnnotation(A, PP).find("virtual_concept") != std::string::npos;
++}
++
++AST_MATCHER(clang::Decl, hasVirtualConceptAnnotation) {
++  auto PP = Node.getASTContext().getPrintingPolicy();
++  for (const auto *A : Node.attrs())
++    if (isVirtualConceptAttribute(A, PP))
++      return true;
++  return false;
++}
++
++} // namespace
++
++// ========================== CHECK ==========================
++
++static constexpr const char *const VCBinding = "VCBinding";
++
++namespace clang::tidy::tfgjuarez {
++
++void VcFixCheck::registerPPCallbacks(const SourceManager &SM, Preprocessor *PP,
++                                     Preprocessor *ModuleExpanderPP) {
++  Inserter.registerPreprocessor(PP);
++}
++
++void VcFixCheck::registerMatchers(MatchFinder *Finder) {
++  Finder->addMatcher(
++      cxxRecordDecl(hasVirtualConceptAnnotation(), hasDefinition())
++          .bind(VCBinding),
++      this);
++}
++
++void VcFixCheck::check(const MatchFinder::MatchResult &Result) {
++  const auto *D = Result.Nodes.getNodeAs<CXXRecordDecl>(VCBinding);
++  if (D == nullptr)
++    return;
++  if (auto CodeReplacement =
++          mapToVirtualConcept(const_cast<CXXRecordDecl *>(D));
++      CodeReplacement.has_value())
++    diag(D->getBeginLoc(), "virtual concept source2source transformation")
++        << FixItHint::CreateReplacement(D->getSourceRange(), *CodeReplacement)
++        << Inserter.createMainFileIncludeInsertion("<memory>")
++        << Inserter.createMainFileIncludeInsertion("<utility>")
++        << Inserter.createMainFileIncludeInsertion("<type_traits>");
++}
++
++} // namespace clang::tidy::tfgjuarez
+diff --git a/clang-tools-extra/clang-tidy/tfgjuarez/VcFixCheck.h b/clang-tools-extra/clang-tidy/tfgjuarez/VcFixCheck.h
+new file mode 100644
+index 000000000..77b77a6c4
+--- /dev/null
++++ b/clang-tools-extra/clang-tidy/tfgjuarez/VcFixCheck.h
+@@ -0,0 +1,39 @@
++//===--- VcFixCheck.h - clang-tidy ------------------------------*- C++ -*-===//
++//
++// Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
++// See https://llvm.org/LICENSE.txt for license information.
++// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
++//
++//===----------------------------------------------------------------------===//
++
++#ifndef LLVM_CLANG_TOOLS_EXTRA_CLANG_TIDY_TFGJUAREZ_VCFIXCHECK_H
++#define LLVM_CLANG_TOOLS_EXTRA_CLANG_TIDY_TFGJUAREZ_VCFIXCHECK_H
++
++#include "../ClangTidyCheck.h"
++#include "../utils/IncludeInserter.h"
++
++namespace clang::tidy::tfgjuarez {
++
++/// FIXME: Write a short description.
++///
++/// For the user-facing documentation see:
++/// http://clang.llvm.org/extra/clang-tidy/checks/tfgjuarez/vc-fix.html
++class VcFixCheck : public ClangTidyCheck {
++public:
++  VcFixCheck(StringRef Name, ClangTidyContext *Context)
++      : ClangTidyCheck(Name, Context),
++        Inserter(Options.getLocalOrGlobal("IncludeStyle",
++                                          utils::IncludeSorter::IS_LLVM),
++                 areDiagsSelfContained()){};
++  void registerPPCallbacks(const SourceManager &SM, Preprocessor *PP,
++                           Preprocessor *ModuleExpanderPP) override;
++  void registerMatchers(ast_matchers::MatchFinder *Finder) override;
++  void check(const ast_matchers::MatchFinder::MatchResult &Result) override;
++
++private:
++  utils::IncludeInserter Inserter;
++};
++
++} // namespace clang::tidy::tfgjuarez
++
++#endif // LLVM_CLANG_TOOLS_EXTRA_CLANG_TIDY_TFGJUAREZ_VCFIXCHECK_H
+diff --git a/clang-tools-extra/docs/ReleaseNotes.rst b/clang-tools-extra/docs/ReleaseNotes.rst
+index 4698df780..6a587cdfd 100644
+--- a/clang-tools-extra/docs/ReleaseNotes.rst
++++ b/clang-tools-extra/docs/ReleaseNotes.rst
+@@ -151,6 +151,11 @@ New checks
+ 
+   FIXME: add release notes.
+ 
++- New :doc:`tfgjuarez-vc-fix
++  <clang-tidy/checks/tfgjuarez/vc-fix>` check.
++
++  FIXME: add release notes.
++
+ New check aliases
+ ^^^^^^^^^^^^^^^^^
+ 
+diff --git a/clang-tools-extra/docs/clang-tidy/checks/list.rst b/clang-tools-extra/docs/clang-tidy/checks/list.rst
+index 7b2605b9d..768ec88f7 100644
+--- a/clang-tools-extra/docs/clang-tidy/checks/list.rst
++++ b/clang-tools-extra/docs/clang-tidy/checks/list.rst
+@@ -368,6 +368,7 @@ Clang-Tidy Checks
+    `readability-uppercase-literal-suffix <readability/uppercase-literal-suffix.html>`_, "Yes"
+    `readability-use-anyofallof <readability/use-anyofallof.html>`_,
+    `tfgjuarez-test-run-rewrite <tfgjuarez/test-run-rewrite.html>`_, "Yes"
++   `tfgjuarez-vc-fix <tfgjuarez/vc-fix.html>`_, "Yes"
+    `zircon-temporary-objects <zircon/temporary-objects.html>`_,
+ 
+ 
+diff --git a/clang-tools-extra/docs/clang-tidy/checks/tfgjuarez/vc-fix.rst b/clang-tools-extra/docs/clang-tidy/checks/tfgjuarez/vc-fix.rst
+new file mode 100644
+index 000000000..6b33cecf9
+--- /dev/null
++++ b/clang-tools-extra/docs/clang-tidy/checks/tfgjuarez/vc-fix.rst
+@@ -0,0 +1,6 @@
++.. title:: clang-tidy - tfgjuarez-vc-fix
++
++tfgjuarez-vc-fix
++================
++
++FIXME: Describe what patterns does the check detect and why. Give examples.
+diff --git a/clang-tools-extra/test/clang-tidy/checkers/tfgjuarez/vc-fix.cpp b/clang-tools-extra/test/clang-tidy/checkers/tfgjuarez/vc-fix.cpp
+new file mode 100644
+index 000000000..11b4ebaf1
+--- /dev/null
++++ b/clang-tools-extra/test/clang-tidy/checkers/tfgjuarez/vc-fix.cpp
+@@ -0,0 +1,14 @@
++// RUN: %check_clang_tidy %s tfgjuarez-vc-fix %t
++
++// FIXME: Add something that triggers the check here.
++void f();
++// CHECK-MESSAGES: :[[@LINE-1]]:6: warning: function 'f' is insufficiently awesome [tfgjuarez-vc-fix]
++
++// FIXME: Verify the applied fix.
++//   * Make the CHECK patterns specific enough and try to make verified lines
++//     unique to avoid incorrect matches.
++//   * Use {{}} for regular expressions.
++// CHECK-FIXES: {{^}}void awesome_f();{{$}}
++
++// FIXME: Add something that doesn't trigger the check here.
++void awesome_f2();
+diff --git a/refactor-examples/vc.sh b/refactor-examples/vc.sh
+new file mode 100755
+index 000000000..7731d077e
+--- /dev/null
++++ b/refactor-examples/vc.sh
+@@ -0,0 +1,3 @@
++#!/usr/bin/sh
++
++../refactor-build/bin/clang-tidy --checks="-*,tfgjuarez-vc-fix" --fix --fix-errors ${@}
+-- 
+2.34.1
+

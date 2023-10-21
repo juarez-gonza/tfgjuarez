@@ -1,7 +1,7 @@
 From 3954514ea6b576922e7fbd00e2bee195c753b9db Mon Sep 17 00:00:00 2001
 From: Gonzalo Juarez <gjuarez@pa.uc3m.es>
 Date: Fri, 15 Sep 2023 19:45:36 +0200
-Subject: [PATCH 8/9] `report`: generate type-erased type
+Subject: [PATCH 08/16] `report`: generate type-erased type
 
 ---
  .../tfgjuarez/TestRunRewriteCheck.cpp         | 43 ++++++++++---------

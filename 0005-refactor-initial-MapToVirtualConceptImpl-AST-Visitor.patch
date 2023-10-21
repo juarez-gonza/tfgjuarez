@@ -1,7 +1,8 @@
 From 55454017f8c4d630544b4f924d4b35e04e63e238 Mon Sep 17 00:00:00 2001
 From: Gonzalo Juarez <gjuarez@pa.uc3m.es>
 Date: Fri, 15 Sep 2023 10:36:14 +0200
-Subject: [PATCH 5/9] `refactor`: initial `MapToVirtualConceptImpl` AST Visitor
+Subject: [PATCH 05/16] `refactor`: initial `MapToVirtualConceptImpl` AST
+ Visitor
 
 ---
  .../tfgjuarez/TestRunRewriteCheck.cpp         | 40 +++++++++++++++++--

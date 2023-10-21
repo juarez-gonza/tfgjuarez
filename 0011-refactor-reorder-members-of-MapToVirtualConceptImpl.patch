@@ -1,0 +1,65 @@
+From 58e6a2c209d8efccfded277f9bdd4e9dcbb85f1e Mon Sep 17 00:00:00 2001
+From: Gonzalo Juarez <gjuarez@pa.uc3m.es>
+Date: Sat, 16 Sep 2023 13:46:18 +0200
+Subject: [PATCH 11/16] `refactor`: reorder members of
+ `MapToVirtualConceptImpl`
+
+---
+ .../tfgjuarez/TestRunRewriteCheck.cpp         | 34 +++++++++----------
+ 1 file changed, 17 insertions(+), 17 deletions(-)
+
+diff --git a/clang-tools-extra/clang-tidy/tfgjuarez/TestRunRewriteCheck.cpp b/clang-tools-extra/clang-tidy/tfgjuarez/TestRunRewriteCheck.cpp
+index 0470562c3..2db219c23 100644
+--- a/clang-tools-extra/clang-tidy/tfgjuarez/TestRunRewriteCheck.cpp
++++ b/clang-tools-extra/clang-tidy/tfgjuarez/TestRunRewriteCheck.cpp
+@@ -77,6 +77,23 @@ char VirtualConceptDefinitionError::ID; // Used by inherited class.
+ 
+ class MapToVirtualConceptImpl
+     : public clang::RecursiveASTVisitor<MapToVirtualConceptImpl> {
++public:
++  std::string Result = "";
++
++  bool shouldTraversePostOrder() const { return true; }
++
++  bool VisitCXXRecordDecl(clang::CXXRecordDecl *D) {
++    Result = finishVirtualConcept(D);
++    return true;
++  }
++
++  bool VisitCXXMethodDecl(clang::CXXMethodDecl *D) {
++    buildMemberFunction(D);
++    buildInnerConcept(D);
++    buildInnerModel(D);
++    return true;
++  }
++
+ private:
+   // Partial results that will be built *logically* in parallel.
+   // These are then accumulated in the `Result` variable.
+@@ -153,23 +170,6 @@ private:
+            "virtual ~" +
+            ConceptId + "() {}\n" + std::move(InnerConcept) + "\n};\n";
+   }
+-
+-public:
+-  std::string Result = "";
+-
+-  bool shouldTraversePostOrder() const { return true; }
+-
+-  bool VisitCXXRecordDecl(clang::CXXRecordDecl *D) {
+-    Result = finishVirtualConcept(D);
+-    return true;
+-  }
+-
+-  bool VisitCXXMethodDecl(clang::CXXMethodDecl *D) {
+-    buildMemberFunction(D);
+-    buildInnerConcept(D);
+-    buildInnerModel(D);
+-    return true;
+-  }
+ };
+ 
+ llvm::Expected<std::string> mapToVirtualConcept(clang::CXXRecordDecl *D) {
+-- 
+2.34.1
+

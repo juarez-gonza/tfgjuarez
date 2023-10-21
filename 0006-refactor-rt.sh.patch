@@ -1,7 +1,7 @@
 From 938c6ebef396460c2d17c638d004c55d7582ec91 Mon Sep 17 00:00:00 2001
 From: Gonzalo Juarez <gjuarez@pa.uc3m.es>
 Date: Fri, 15 Sep 2023 11:00:07 +0200
-Subject: [PATCH 6/9] `refactor`: `rt.sh`
+Subject: [PATCH 06/16] `refactor`: `rt.sh`
 
 ---
  refactor-examples/rt.sh | 3 +++
