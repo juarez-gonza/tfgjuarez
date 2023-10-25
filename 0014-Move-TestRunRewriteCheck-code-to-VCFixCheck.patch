@@ -1,7 +1,7 @@
 From 4a13517afa5d81aa386a29731a201e09e570bf03 Mon Sep 17 00:00:00 2001
 From: Gonzalo Juarez <gjuarez@pa.uc3m.es>
 Date: Mon, 2 Oct 2023 10:52:46 +0200
-Subject: [PATCH 14/16] Move `TestRunRewriteCheck` code to `VCFixCheck`
+Subject: [PATCH 14/17] Move `TestRunRewriteCheck` code to `VCFixCheck`
 
 ---
  .../clang-tidy/tfgjuarez/CMakeLists.txt       |   1 +

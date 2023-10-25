@@ -1,0 +1,528 @@
+From 1629eec1b21b5550f0aff5463ea60716c85ee9fa Mon Sep 17 00:00:00 2001
+From: Gonzalo Juarez <gjuarez@pa.uc3m.es>
+Date: Wed, 25 Oct 2023 20:50:21 +0200
+Subject: [PATCH 17/17] refactor: Add support for multiple arguments (but only
+ 1 type erased argument)
+
+---
+ .../clang-tidy/tfgjuarez/OverrideFixCheck.cpp |  67 ++++++--
+ .../clang-tidy/tfgjuarez/VcFixCheck.cpp       | 150 +++++++++++++-----
+ refactor-examples/a.cpp                       |  30 ++--
+ refactor-examples/expected/main.cpp           |  17 --
+ refactor-examples/expected/sum.hpp            |  22 +--
+ refactor-examples/expected/sum_lib.hpp        |   5 +
+ 6 files changed, 198 insertions(+), 93 deletions(-)
+
+diff --git a/clang-tools-extra/clang-tidy/tfgjuarez/OverrideFixCheck.cpp b/clang-tools-extra/clang-tidy/tfgjuarez/OverrideFixCheck.cpp
+index bc6246e59..e76c2a330 100644
+--- a/clang-tools-extra/clang-tidy/tfgjuarez/OverrideFixCheck.cpp
++++ b/clang-tools-extra/clang-tidy/tfgjuarez/OverrideFixCheck.cpp
+@@ -25,9 +25,11 @@ using namespace clang::ast_matchers;
+ // - "Vc" stands for "virtual concept".
+ // - "Ow" stands for "overwrite" or "overwriter".
+ 
++// TODO: Refactor repetitive usage of filter + accumulate. Extract common code
++// with VcFixCheck.cpp into it's own file.
+ // TODO: check that all functions declared in VC are also declared in OW.
+-// TODO: handle overrides for array type parameters.
+-// TODO: handle more arguments.
++// TODO: handle overrides for array type parameters. First check if it makes
++// sense to do this.
+ 
+ namespace {
+ 
+@@ -44,6 +46,18 @@ std::string readAnnotation(const clang::Attr *A, clang::PrintingPolicy PP) {
+   return Str;
+ }
+ 
++bool isVcAttr(const clang::Attr *A, clang::PrintingPolicy PP) {
++  return A->getKind() == clang::attr::Annotate &&
++         readAnnotation(A, PP).find("virtual_concept") != std::string::npos;
++}
++
++bool hasVcAnnotationImpl(const clang::Decl &D) {
++  return llvm::any_of(
++      D.attrs(), [PP = D.getASTContext().getPrintingPolicy()](clang::Attr *A) {
++        return isVcAttr(A, PP);
++      });
++}
++
+ bool isVcOwAttr(const clang::Attr *A, clang::PrintingPolicy PP) {
+   return A->getKind() == clang::attr::Annotate &&
+          readAnnotation(A, PP).find(AnnotationPattern) != std::string::npos;
+@@ -102,20 +116,49 @@ bool isVcOwDecl(const clang::Decl &D) {
+ // ========================== CODE GENERATION ==========================
+ 
+ std::string buildOverridenMember(const clang::FunctionDecl &F) {
++  clang::ParmVarDecl *VcParam = llvm::find_singleton<clang::ParmVarDecl>(
++      F.parameters(), [](clang::ParmVarDecl *P, bool) {
++        return hasVcAnnotationImpl(*P) ? P : nullptr;
++      });
++
++  auto BuildParamList = [&]() {
++    auto FilteredParamList = llvm::make_filter_range(
++        F.parameters(),
++        [VcParam](clang::ParmVarDecl *P) { return P != VcParam; });
++    return std::accumulate(FilteredParamList.begin(), FilteredParamList.end(),
++                           std::string{},
++                           [](std::string Acc, clang::ParmVarDecl *P) {
++                             const auto *Sep = Acc.size() == 0 ? "" : ", ";
++                             return Acc + Sep +
++                                    P->getOriginalType().getAsString() + " " +
++                                    P->getNameAsString();
++                           });
++  };
++
++  auto BuildParamFwList = [&]() {
++    return std::accumulate(F.param_begin(), F.param_end(), std::string{},
++                           [VcParam](std::string Acc, clang::ParmVarDecl *P) {
++                             const auto *Sep = Acc.size() == 0 ? "" : ", ";
++                             auto Param =
++                                 VcParam == P ? "Params" : P->getNameAsString();
++                             return Acc + Sep + Param;
++                           });
++  };
++
+   auto MemberName = "c" + F.getNameAsString();
+-  return F.getReturnType().getAsString() + " " + MemberName +
+-         "() const override { return " + F.getQualifiedNameAsString() +
+-         "(Params); }";
++  return F.getReturnType().getAsString() + " " + MemberName + "(" +
++         BuildParamList() + ") const override { return " + F.getNameAsString() +
++         "(" + BuildParamFwList() + "); }";
+ }
+ 
+-std::string buildOverridenMembers(const clang::NamespaceDecl &OW) {
+-  auto R = llvm::make_filter_range(OW.decls(), [](clang::Decl *X) {
+-    return clang::isa<clang::FunctionDecl>(X);
++std::string buildOverridenMembers(const clang::CXXRecordDecl &VC) {
++  auto R = llvm::make_filter_range(VC.decls(), [](clang::Decl *X) {
++    return !X->isImplicit() && clang::isa<clang::FunctionDecl>(X);
+   });
+ 
+   return std::accumulate(
+-      R.begin(), R.end(), std::string{}, [](std::string Acc, clang::Decl *X) {
+-        return Acc + buildOverridenMember(*X->getAsFunction()) + "\n";
++      R.begin(), R.end(), std::string{}, [](std::string Acc, clang::Decl *F) {
++        return Acc + buildOverridenMember(*F->getAsFunction()) + "\n";
+       });
+ }
+ 
+@@ -132,7 +175,7 @@ std::string buildExplicitModel(const clang::CXXRecordDecl &VC,
+   return "template <> struct " + VC.getQualifiedNameAsString() +
+          "::" + ModelName + "<" + OwName + "> : " + VcName + "Concept {\n" +
+          ModelName + "(" + OwName + " X): Params(X) {}\n" +
+-         buildOverridenMembers(OW) + "private: " + OwName + " Params;\n};\n";
++         buildOverridenMembers(VC) + "private: " + OwName + " Params;\n};\n";
+ }
+ 
+ // ========================== NAME LOOKUP ==========================
+@@ -164,7 +207,7 @@ const clang::NamedDecl *declLookup(const clang::DeclContext &DC,
+ 
+   auto Eq = [&DeclName](const clang::NamedDecl &ND) {
+     return ND.getDeclName().isIdentifier() &&
+-           std::move(ND.getQualifiedNameAsString()) == DeclName;
++           ND.getQualifiedNameAsString() == DeclName;
+   };
+ 
+   auto Rec =
+diff --git a/clang-tools-extra/clang-tidy/tfgjuarez/VcFixCheck.cpp b/clang-tools-extra/clang-tidy/tfgjuarez/VcFixCheck.cpp
+index aed15b639..7cd34daa9 100644
+--- a/clang-tools-extra/clang-tidy/tfgjuarez/VcFixCheck.cpp
++++ b/clang-tools-extra/clang-tidy/tfgjuarez/VcFixCheck.cpp
+@@ -10,10 +10,19 @@
+ #include "clang/AST/ASTContext.h"
+ #include "clang/AST/RecursiveASTVisitor.h"
+ #include "clang/ASTMatchers/ASTMatchFinder.h"
++#include <numeric>
+ 
+ using namespace clang::ast_matchers;
+ 
+-// TODO: handle more arguments.
++// TODO: Refactor repetitive usage of filter + accumulate. Extract common code
++// with OverrideFixCheck.cpp into it's own file.
++// TODO: look at replacing unique_ptr with polymorphic_value or adding copy
++// ctor/assignment to the generated VC struct
++// (https://www.open-std.org/jtc1/sc22/wg21/docs/papers/2019/p0201r5.html).
++// NOTE: For whatever option of the above, check small object optimization
++// (see: https://stlab.cc/tip/2017/12/23/small-object-optimizations.html,
++// https://en.cppreference.com/w/cpp/types/aligned_storage,
++// https://en.cppreference.com/w/cpp/utility/launder).
+ 
+ namespace {
+ 
+@@ -24,19 +33,19 @@ class MapToVirtualConceptImpl
+ public:
+   std::string Result = "";
+ 
+-  MapToVirtualConceptImpl(clang::CXXRecordDecl *X) : VC{X} {}
++  MapToVirtualConceptImpl(const clang::CXXRecordDecl &X) : VC{&X} {}
+ 
+   bool shouldTraversePostOrder() const { return true; }
+ 
+   bool VisitCXXRecordDecl(clang::CXXRecordDecl *D) {
+-    Result = finishVirtualConcept(D);
++    Result = finishVirtualConcept(*D);
+     return true;
+   }
+ 
+   bool VisitCXXMethodDecl(clang::CXXMethodDecl *D) {
+-    buildMemberFunction(D);
+-    buildInnerConcept(D);
+-    buildInnerModel(D);
++    buildMemberFunction(*D);
++    buildInnerConcept(*D);
++    buildInnerModel(*D);
+     return true;
+   }
+ 
+@@ -46,34 +55,92 @@ private:
+   std::string InnerModel = "";
+   std::string InnerConcept = "";
+   std::string MemberFunctions = "";
+-  clang::CXXRecordDecl *VC = nullptr;
++  const clang::CXXRecordDecl *VC = nullptr;
++
++  bool equalVcType(clang::QualType T) {
++    return T.getCanonicalType() ==
++           VC->getTypeForDecl()->getCanonicalTypeInternal();
++  }
++
++  std::string buildConceptParamList(const clang::FunctionDecl &D) {
++    auto FilteredParamList =
++        llvm::make_filter_range(D.parameters(), [this](clang::ParmVarDecl *P) {
++          return !equalVcType(P->getOriginalType());
++        });
++    return std::accumulate(FilteredParamList.begin(), FilteredParamList.end(),
++                           std::string{},
++                           [](std::string Acc, clang::ParmVarDecl *P) {
++                             const auto *Sep = Acc.size() == 0 ? "" : ", ";
++                             return Acc + Sep +
++                                    P->getOriginalType().getAsString() + " " +
++                                    P->getNameAsString();
++                           });
++  }
++
++  void buildMemberFunction(const clang::FunctionDecl &D) {
++    // These Build functions would be nicer with an intersperse function.
++    auto BuildParamList = [&]() {
++      return std::accumulate(
++          D.param_begin(), D.param_end(), std::string{},
++          [this](std::string Acc, clang::ParmVarDecl *P) {
++            auto ParamType = P->getOriginalType();
++            const auto *Sep = Acc.size() == 0 ? "" : ", ";
++            auto Param =
++                equalVcType(ParamType)
++                    ? "const " + VC->getCanonicalDecl()->getNameAsString() +
++                          "& X"
++                    : ParamType.getAsString() + " " + P->getNameAsString();
++            return Acc + Sep + Param;
++          });
++    };
++
++    auto BuildParamFwList = [&]() {
++      auto FilteredParamList = llvm::make_filter_range(
++          D.parameters(), [this](clang::ParmVarDecl *P) {
++            return !equalVcType(P->getOriginalType());
++          });
++      return std::accumulate(FilteredParamList.begin(), FilteredParamList.end(),
++                             std::string{},
++                             [](std::string Acc, clang::ParmVarDecl *P) {
++                               const auto *Sep = Acc.size() == 0 ? "" : ", ";
++                               return Acc + Sep + P->getNameAsString();
++                             });
++    };
+ 
+-  void buildMemberFunction(clang::FunctionDecl *D) {
+     MemberFunctions += "friend " +
+-                       D->getReturnType().getCanonicalType().getAsString() +
+-                       " " + D->getNameAsString() + "(const " +
+-                       VC->getCanonicalDecl()->getNameAsString() +
+-                       "& X) {\n"
+-                       "return X.WrappedParams->c" +
+-                       D->getNameAsString() +
+-                       "();"
+-                       "\n}\n";
++                       D.getReturnType().getCanonicalType().getAsString() +
++                       " " + D.getNameAsString() + "(" + BuildParamList() +
++                       ") {\nreturn X.WrappedParams->c" + D.getNameAsString() +
++                       "(" + BuildParamFwList() + ");\n}\n";
+   }
+ 
+-  void buildInnerModel(clang::FunctionDecl *D) {
+-    InnerModel += D->getReturnType().getCanonicalType().getAsString() + " c" +
+-                  D->getNameAsString() + "() const override { return " +
+-                  D->getNameAsString() + "(Params); }\n";
++  void buildInnerModel(const clang::FunctionDecl &D) {
++    auto BuildParamFwList = [&]() {
++      return std::accumulate(D.param_begin(), D.param_end(), std::string{},
++                             [this](std::string Acc, clang::ParmVarDecl *P) {
++                               auto ParamType = P->getOriginalType();
++                               const auto *Sep = Acc.size() == 0 ? "" : ", ";
++                               auto Param = equalVcType(ParamType)
++                                                ? "Params"
++                                                : P->getNameAsString();
++                               return Acc + Sep + Param;
++                             });
++    };
++
++    InnerModel += D.getReturnType().getCanonicalType().getAsString() + " c" +
++                  D.getNameAsString() + "(" + buildConceptParamList(D) +
++                  ") const override { return " + D.getNameAsString() + "(" +
++                  BuildParamFwList() + "); }\n";
+   }
+ 
+-  void buildInnerConcept(clang::FunctionDecl *D) {
+-    InnerConcept += "virtual " +
+-                    D->getReturnType().getCanonicalType().getAsString() + " c" +
+-                    D->getNameAsString() + "() const = 0;\n";
++  void buildInnerConcept(const clang::FunctionDecl &D) {
++    InnerConcept +=
++        "virtual " + D.getReturnType().getCanonicalType().getAsString() + " c" +
++        D.getNameAsString() + "(" + buildConceptParamList(D) + ") const = 0;\n";
+   }
+ 
+-  std::string finishVirtualConcept(clang::CXXRecordDecl *D) {
+-    auto ClassId = D->getNameAsString();
++  std::string finishVirtualConcept(const clang::CXXRecordDecl &D) {
++    auto ClassId = D.getNameAsString();
+     auto ModelId = ClassId + "Model";
+     auto ConceptId = ClassId + "Concept";
+     return "virtual_concept " + ClassId +
+@@ -116,13 +183,13 @@ private:
+     return "struct " + ConceptId +
+            " {\n"
+            "virtual ~" +
+-           ConceptId + "() {}\n" + std::move(InnerConcept) + "\n};\n";
++           ConceptId + "() = default;\n" + std::move(InnerConcept) + "\n};\n";
+   }
+ };
+ 
+-std::optional<std::string> mapToVirtualConcept(clang::CXXRecordDecl *D) {
++std::optional<std::string> mapToVirtualConcept(const clang::CXXRecordDecl &D) {
+   MapToVirtualConceptImpl M{D};
+-  if (!M.TraverseCXXRecordDecl(const_cast<clang::CXXRecordDecl *>(D)))
++  if (!M.TraverseCXXRecordDecl(&const_cast<clang::CXXRecordDecl &>(D)))
+     return std::nullopt;
+   return M.Result;
+ }
+@@ -137,19 +204,20 @@ std::string readAnnotation(const clang::Attr *A, clang::PrintingPolicy PP) {
+   return Str;
+ }
+ 
+-bool isVirtualConceptAttribute(const clang::Attr *A, clang::PrintingPolicy PP) {
++bool isVcAttr(const clang::Attr *A, clang::PrintingPolicy PP) {
+   return A->getKind() == clang::attr::Annotate &&
+          readAnnotation(A, PP).find("virtual_concept") != std::string::npos;
+ }
+ 
+-AST_MATCHER(clang::Decl, hasVirtualConceptAnnotation) {
+-  auto PP = Node.getASTContext().getPrintingPolicy();
+-  for (const auto *A : Node.attrs())
+-    if (isVirtualConceptAttribute(A, PP))
+-      return true;
+-  return false;
++bool hasVcAnnotationImpl(const clang::Decl &D) {
++  return llvm::any_of(
++      D.attrs(), [PP = D.getASTContext().getPrintingPolicy()](clang::Attr *A) {
++        return isVcAttr(A, PP);
++      });
+ }
+ 
++AST_MATCHER(clang::Decl, hasVcAnnotation) { return hasVcAnnotationImpl(Node); }
++
+ } // namespace
+ 
+ // ========================== CHECK ==========================
+@@ -165,20 +233,16 @@ void VcFixCheck::registerPPCallbacks(const SourceManager &SM, Preprocessor *PP,
+ 
+ void VcFixCheck::registerMatchers(MatchFinder *Finder) {
+   Finder->addMatcher(
+-      cxxRecordDecl(hasVirtualConceptAnnotation(), hasDefinition())
+-          .bind(VCBinding),
+-      this);
++      cxxRecordDecl(hasVcAnnotation(), hasDefinition()).bind(VCBinding), this);
+ }
+ 
+ void VcFixCheck::check(const MatchFinder::MatchResult &Result) {
+   const auto *D = Result.Nodes.getNodeAs<CXXRecordDecl>(VCBinding);
+   if (D == nullptr)
+     return;
+-  if (auto CodeReplacement =
+-          mapToVirtualConcept(const_cast<CXXRecordDecl *>(D));
+-      CodeReplacement.has_value())
++  if (auto Code = mapToVirtualConcept(*D); Code.has_value())
+     diag(D->getBeginLoc(), "virtual concept source2source transformation")
+-        << FixItHint::CreateReplacement(D->getSourceRange(), *CodeReplacement)
++        << FixItHint::CreateReplacement(D->getSourceRange(), *Code)
+         << Inserter.createMainFileIncludeInsertion("<memory>")
+         << Inserter.createMainFileIncludeInsertion("<utility>")
+         << Inserter.createMainFileIncludeInsertion("<type_traits>");
+diff --git a/refactor-examples/a.cpp b/refactor-examples/a.cpp
+index fe2bcf87e..d212a2b99 100644
+--- a/refactor-examples/a.cpp
++++ b/refactor-examples/a.cpp
+@@ -5,8 +5,6 @@
+ 
+ #define virtual_ __attribute__((annotate("virtual_concept")))
+ #define virtual_concept struct virtual_
+-// #define override_(VCId)                                                        \
+-//   __attribute__((annotate("virtual_concept_override_" #VCId)))
+ 
+ #define override_concept(VCId, Type)                                           \
+   inline namespace                                                             \
+@@ -16,25 +14,35 @@ namespace NameSpacey {
+ virtual_concept X {
+   void foo(virtual_ X);
+   void foobar(virtual_ X);
++  void hiNTimes(int N, virtual_ X, int D);
+ };
+ } // namespace NameSpacey
+ 
+ override_concept(NameSpacey::X, int) {
+   void foo(int) { std::cout << "foo(int)\n"; }
+   void foobar(int) { std::cout << "foobar(int)\n"; }
++  void hi_n_times(int N, int X, int D) {
++    for (int i = 0; i < N; ++i)
++      std::cout << "hi_n_times(int, int, int) - " << i + 1 << "\n";
++  }
+ }
+ 
+-// template <> struct NameSpacey::X::XModel<int> : XConcept {
+-//   XModel(int X) : Params(X) {}
+-//   void callFoo() const { foo(Params); }
+-//   callFoobar() const { foobar(Params); }
+-// private:
+-//   int Params;
+-// };
++override_concept(NameSpacey::X, double) {
++  void foo(double) { std::cout << "foo(double)\n"; }
++  void foobar(double) { std::cout << "foobar(double)\n"; }
++  void hi_n_times(int N, double X, int D) {
++    for (int i = 0; i < N; ++i)
++      std::cout << "hi_n_times(int, double, int) - " << i + 1 << "\n";
++  }
++}
+ 
+-void bar(NameSpacey::X Val) { foo(Val); }
++void bar(NameSpacey::X& Val) { foo(Val); }
+ 
+ int main() {
+-  bar(1);
++  std::vector<NameSpacey::X> Xs;
++  Xs.emplace_back(1);
++  Xs.emplace_back(2.0);
++  for (auto& Item : Xs)
++    bar(Item);
+   return 0;
+ }
+diff --git a/refactor-examples/expected/main.cpp b/refactor-examples/expected/main.cpp
+index fe29d5d90..eb5c9fa2b 100644
+--- a/refactor-examples/expected/main.cpp
++++ b/refactor-examples/expected/main.cpp
+@@ -1,20 +1,3 @@
+-//// File: client.cpp
+-
+ #include "sum.hpp"
+ #include <variant>
+ #include <vector>
+-
+-int main() {
+-  // This is a sort of work-around the lacking part of this design, which is a
+-  // key usage of type-erasure, storing type-erased elements in a data
+-  // structure. However, it does depend on std::variant, which is a closed
+-  // sum-type, but at least it has well determined points of changes for when
+-  // new overrides are introduced.
+-  std::vector<Foo> Items{};
+-  Items.emplace_back(3);
+-  Items.emplace_back("asd");
+-  // Items.emplace_back(4.5);
+-  for (auto &Item : Items)
+-    foo(Item);
+-  return 0;
+-}
+diff --git a/refactor-examples/expected/sum.hpp b/refactor-examples/expected/sum.hpp
+index 568df8cf8..3a7f69017 100644
+--- a/refactor-examples/expected/sum.hpp
++++ b/refactor-examples/expected/sum.hpp
+@@ -3,6 +3,10 @@
+ #include <string>
+ 
+ void foo(int X);
++inline void hi_n_times(int X, int n) {
++  for (int i = 0; i < n; ++i)
++    std::cout << "hi_n_times(int, int) - " << i + 1 << "\n";
++}
+ 
+ // the specialization below should be automatically generated from the function
+ // above. This struct is needed because the definition of foo(int) is not
+@@ -14,7 +18,8 @@ void foo(int X);
+ 
+ template <> struct Foo::FooModel<int> final : FooConcept {
+   FooModel(int X) : Params(X) {}
+-  void callFoo() const override { foo(Params); }
++  void callFoo() const override { return foo(Params); }
++  void callHi_n_times(int n) const override { return hi_n_times(Params, n); }
+ 
+ private:
+   int Params;
+@@ -25,22 +30,19 @@ template <size_t N> void foo(const char (&Str)[N]) {
+   std::cout << "const char(&)[N] case: " << Str << "\n";
+ }
+ 
++template <size_t N> void hi_n_times(const char (&Str)[N], int n) {
++  for (int i = 0; i < n; ++i)
++    std::cout << "hi_n_times(const char(&)[N], int) - " << i + 1 << "\n";
++}
++
+ // the specialization below should be automatically generated from the function
+ // above. This struct is needed because the definition of foo(const char (&)[N])
+ // is not seen by FooModel since it is declared FooModel's definition.
+ template <size_t N> struct Foo::FooModel<const char (&)[N]> final : FooConcept {
+   FooModel(const char(&X)[N]) : Params(X) {}
+   void callFoo() const override { foo<N>(Params); }
++  void callHi_n_times(int n) const override { return hi_n_times<N>(Params, n); }
+ 
+ private:
+   const char (&Params)[N];
+ };
+-
+-// void foo(std::string Str);
+-// template <> struct Foo::FooModel<std::string> final : FooConcept {
+-//   FooModel(std::string X) : Params(X) {}
+-//   void callFoo() const override { foo(Params); }
+-//
+-// private:
+-//   std::string Params;
+-// };
+diff --git a/refactor-examples/expected/sum_lib.hpp b/refactor-examples/expected/sum_lib.hpp
+index 7cc6dfb23..de6ed9a73 100644
+--- a/refactor-examples/expected/sum_lib.hpp
++++ b/refactor-examples/expected/sum_lib.hpp
+@@ -33,10 +33,13 @@ public:
+ 
+   friend void foo(const Foo &X) { return X.WrappedParams->callFoo(); }
+ 
++  friend void hi_n_times(const Foo& X, int n) { return X.WrappedParams->callHi_n_times(n); }
++
+   struct FooConcept {
+     virtual ~FooConcept() {}
+     // return type cannot be deduced due to limitation on virtual functions
+     virtual void callFoo() const = 0;
++    virtual void callHi_n_times(int n) const = 0;
+   };
+ 
+   // this is a fallback FooModel for defaulted and non handled cases
+@@ -44,7 +47,9 @@ public:
+     template <typename U> FooModel(U &&X) : Params(std::forward<U>(X)) {}
+     template <typename U, size_t N> FooModel(U (&X)[N]) : Params(X) {}
+ 
++    // should Params be passed by std::move(Params)?
+     void callFoo() const override { return foo(Params); }
++    void callHi_n_times(int n) const override { return foo(Params, n); }
+ 
+   private:
+     S Params;
+-- 
+2.34.1
+

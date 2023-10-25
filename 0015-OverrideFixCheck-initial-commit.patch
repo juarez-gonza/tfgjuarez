@@ -1,7 +1,7 @@
 From e36efb0af88c7d4f5a82064e24f45eafe4603374 Mon Sep 17 00:00:00 2001
 From: Gonzalo Juarez <gjuarez@pa.uc3m.es>
 Date: Tue, 3 Oct 2023 16:14:49 +0200
-Subject: [PATCH 15/16] `OverrideFixCheck` initial commit
+Subject: [PATCH 15/17] `OverrideFixCheck` initial commit
 
 ---
  .../clang-tidy/tfgjuarez/CMakeLists.txt       |   2 +-

@@ -1,7 +1,7 @@
 From bf05a60e986f265c3ce3780e16b8b0e08470ec6d Mon Sep 17 00:00:00 2001
 From: Gonzalo Juarez <gjuarez@pa.uc3m.es>
 Date: Sun, 22 Oct 2023 00:57:44 +0200
-Subject: [PATCH 16/16] `refactor`: `OverrideFixCheck` basic functionality
+Subject: [PATCH 16/17] `refactor`: `OverrideFixCheck` basic functionality
 
 ---
  .../clang-tidy/tfgjuarez/OverrideFixCheck.cpp | 43 +++++++++++++++++--

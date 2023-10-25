@@ -1,7 +1,7 @@
 From 58e6a2c209d8efccfded277f9bdd4e9dcbb85f1e Mon Sep 17 00:00:00 2001
 From: Gonzalo Juarez <gjuarez@pa.uc3m.es>
 Date: Sat, 16 Sep 2023 13:46:18 +0200
-Subject: [PATCH 11/16] `refactor`: reorder members of
+Subject: [PATCH 11/17] `refactor`: reorder members of
  `MapToVirtualConceptImpl`
 
 ---

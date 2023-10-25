@@ -1,7 +1,7 @@
 From 349d57d5eb8a639f4ff40f5eaab579527cf8c5b2 Mon Sep 17 00:00:00 2001
 From: Gonzalo Juarez <gjuarez@pa.uc3m.es>
 Date: Wed, 13 Sep 2023 19:48:16 +0200
-Subject: [PATCH 01/16] `tfgjuarez`: initial commit
+Subject: [PATCH 01/17] `tfgjuarez`: initial commit
 
 ---
  clang-tools-extra/clang-tidy/CMakeLists.txt   |  2 ++

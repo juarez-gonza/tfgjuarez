@@ -1,7 +1,7 @@
 From 6f0f0d061b3d8d4c5ac1671c9735caa50ba4d153 Mon Sep 17 00:00:00 2001
 From: Gonzalo Juarez <gjuarez@pa.uc3m.es>
 Date: Sun, 1 Oct 2023 20:13:58 +0200
-Subject: [PATCH 12/16] allow definition of virtual concept functions with
+Subject: [PATCH 12/17] allow definition of virtual concept functions with
  friend keyword
 
 ---
